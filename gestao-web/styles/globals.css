@@ -1,0 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #0E1116; }
+body { font-family: 'Inter', sans-serif; }
+#__next { min-height: 100vh; }
+::selection { background: #4FD1AE; color: #0E1116; }
+
+input, select, button { font-family: inherit; }
