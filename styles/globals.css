@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+:root {
+  /* Corporate / ERP theme — light, navy accent, sober */
+  --bg: #F3F5F8;
+  --surface: #FFFFFF;
+  --surface-alt: #EEF1F5;
+  --border: #DEE3EA;
+  --border-strong: #C7D0DB;
+  --text: #1B2733;
+  --text-muted: #5B6B7C;
+  --text-dim: #8B98A6;
+
+  --accent: #1F3A5F;
+  --accent-contrast: #FFFFFF;
+  --accent-shadow: rgba(31, 58, 95, 0.28);
+  --accent-soft-10: rgba(31, 58, 95, 0.07);
+  --accent-soft-12: rgba(31, 58, 95, 0.09);
+  --accent-soft-15: rgba(31, 58, 95, 0.11);
+
+  --success: #2C7A57;
+  --success-soft-15: rgba(44, 122, 87, 0.12);
+
+  --danger: #B3413E;
+  --danger-soft-12: rgba(179, 65, 62, 0.12);
+
+  --warning: #B8860B;
+  --warning-soft-15: rgba(184, 134, 11, 0.14);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); }
+body { font-family: 'Inter', sans-serif; }
+#__next { min-height: 100vh; }
+::selection { background: var(--accent); color: var(--accent-contrast); }
+
+input, select, button { font-family: inherit; }
