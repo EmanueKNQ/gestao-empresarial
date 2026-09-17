@@ -4,12 +4,27 @@ import {
   LayoutDashboard, TrendingDown, AlertCircle, CheckCircle2, FileBarChart,
   ChevronRight, ArrowLeft, Download, ArrowLeftRight, ChevronDown, ChevronUp,
   CreditCard, Receipt, Percent, RefreshCw, Shield, ShoppingCart,
+  CalendarDays, Bell, ArrowRight, Clock, Users, LogOut, KeyRound, Lock,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import * as db from '../lib/data';
+import { supabase } from '../lib/supabaseClient';
+
+const ABAS_SISTEMA = [
+  { key: 'dashboard', label: 'Visão geral' },
+  { key: 'agenda', label: 'Agenda' },
+  { key: 'empresas', label: 'Empresas' },
+  { key: 'bancos', label: 'Bancos' },
+  { key: 'contas', label: 'Contas a pagar' },
+  { key: 'emprestimos', label: 'Empréstimos' },
+  { key: 'taxas', label: 'Taxas' },
+  { key: 'seguros', label: 'Seguros' },
+  { key: 'vendas', label: 'Vendas' },
+  { key: 'relatorios', label: 'Relatórios' },
+];
 
 const BANDEIRAS = ['Visa', 'Mastercard', 'Elo', 'American Express', 'Hipercard', 'Outra'];
 const PARCELAS_RANGE = Array.from({ length: 11 }, (_, i) => i + 2);
@@ -35,6 +50,19 @@ function anosDisponiveis() {
   for (let y = atual; y >= ANO_INICIAL_VENDAS; y--) arr.push(y);
   return arr;
 }
+const TIPOS_COMPROMISSO = [
+  { value: 'compromisso', label: 'Compromisso' },
+  { value: 'obrigacao', label: 'Obrigação' },
+];
+const OPCOES_ALERTA = [
+  { value: 0, label: 'Na hora' },
+  { value: 15, label: '15 min antes' },
+  { value: 30, label: '30 min antes' },
+  { value: 60, label: '1 hora antes' },
+  { value: 180, label: '3 horas antes' },
+  { value: 1440, label: '1 dia antes' },
+  { value: 2880, label: '2 dias antes' },
+];
 const PDF_NAVY = [31, 58, 95];
 const PDF_TEXT = [27, 39, 51];
 const PDF_MUTED_BG = [241, 244, 247];
@@ -48,6 +76,39 @@ function addMonthsLocal(iso, n) {
   const [y, m, d] = iso.split('-').map(Number);
   const date = new Date(y, (m - 1) + n, d);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+// ---- Helpers de data+hora (agenda) ----
+// Converte um timestamp ISO para o formato aceito por <input type="datetime-local">
+function toDatetimeLocal(iso) {
+  const d = iso ? new Date(iso) : new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fmtDataHora(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} às ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+// Descrição relativa: "em 2h", "hoje às 14:00", "atrasado 3d"
+function descreveQuando(iso) {
+  const alvo = new Date(iso);
+  const agora = new Date();
+  const diffMin = Math.round((alvo - agora) / 60000);
+  if (diffMin < 0) {
+    const atraso = Math.abs(diffMin);
+    if (atraso < 60) return `atrasado ${atraso} min`;
+    if (atraso < 1440) return `atrasado ${Math.floor(atraso / 60)}h`;
+    return `atrasado ${Math.floor(atraso / 1440)}d`;
+  }
+  if (diffMin < 60) return `em ${diffMin} min`;
+  if (diffMin < 1440) return `em ${Math.floor(diffMin / 60)}h`;
+  return `em ${Math.floor(diffMin / 1440)}d`;
+}
+// Momento em que o alerta deve disparar (data/hora menos os minutos de antecedência)
+function momentoAlerta(c) {
+  return new Date(new Date(c.data_hora).getTime() - (c.alerta_minutos || 0) * 60000);
 }
 
 // ---------- Reusable UI ----------
@@ -340,16 +401,101 @@ function ViewStyle() {
 // MAIN APP
 // ============================================================
 
-export default function Home() {
+// ============================================================
+// PORTA DE ENTRADA: autenticação e carregamento do perfil
+// ============================================================
+
+export default function AppGate() {
+  const [session, setSession] = useState(undefined); // undefined = ainda verificando
+  const [perfil, setPerfil] = useState(null);
+  const [perfilErro, setPerfilErro] = useState(null);
+  const [carregandoPerfil, setCarregandoPerfil] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setPerfil(null); return; }
+    setCarregandoPerfil(true);
+    setPerfilErro(null);
+    db.fetchPerfil(session.user.id)
+      .then((p) => setPerfil(p))
+      .catch(() => setPerfilErro('Seu usuário ainda não tem um perfil liberado. Peça para um administrador configurar seu acesso.'))
+      .finally(() => setCarregandoPerfil(false));
+  }, [session]);
+
+  if (session === undefined) return <CenterMsg text="Carregando…" />;
+  if (!session) return <LoginScreen />;
+  if (carregandoPerfil) return <CenterMsg text="Carregando seu perfil…" />;
+  if (perfilErro) return <CenterMsg text={perfilErro} error onLogout={() => supabase.auth.signOut()} />;
+  if (!perfil) return <CenterMsg text="Perfil não encontrado." error onLogout={() => supabase.auth.signOut()} />;
+
+  return <Home perfil={perfil} />;
+}
+
+function LoginScreen() {
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState('');
+  const [carregando, setCarregando] = useState(false);
+
+  const entrar = async () => {
+    if (!email || !senha) return;
+    setCarregando(true);
+    setErro('');
+    const { error } = await db.signIn(email, senha);
+    if (error) setErro('E-mail ou senha incorretos.');
+    setCarregando(false);
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-box">
+        <div className="login-icon"><Lock size={22} /></div>
+        <h1>Gestão Empresarial</h1>
+        <p className="login-sub">Entre com seu e-mail e senha para continuar.</p>
+        <Field label="E-mail"><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seu@email.com" autoFocus /></Field>
+        <Field label="Senha"><input className="input" type="password" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="••••••••" onKeyDown={(e) => e.key === 'Enter' && entrar()} /></Field>
+        {erro && <p className="login-erro">{erro}</p>}
+        <PrimaryButton full onClick={entrar}>{carregando ? 'Entrando…' : 'Entrar'}</PrimaryButton>
+      </div>
+      <style jsx>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&display=swap');
+        .login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); padding:20px; }
+        .login-box { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:32px 26px; width:100%; max-width:360px; box-shadow:0 8px 28px rgba(27,39,51,0.08); display:flex; flex-direction:column; gap:14px; }
+        .login-icon { width:44px; height:44px; border-radius:11px; background:var(--accent-soft-12); color:var(--accent); display:flex; align-items:center; justify-content:center; margin-bottom:4px; }
+        h1 { font-family:'Space Grotesk',sans-serif; font-size:20px; color:var(--text); margin:0; font-weight:700; }
+        .login-sub { font-size:13px; color:var(--text-muted); margin:0 0 6px; }
+        .login-erro { color:var(--danger); font-size:13px; margin:0; }
+      `}</style>
+      <style jsx>{inputCss}</style>
+    </div>
+  );
+}
+
+// ============================================================
+// APP PRINCIPAL
+// ============================================================
+
+function Home({ perfil }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState(null);
-  const [tab, setTab] = useState('dashboard');
+  const isAdmin = perfil.papel === 'admin';
+  const abasPermitidas = isAdmin ? [...ABAS_SISTEMA.map((a) => a.key), 'usuarios'] : (perfil.abas || []);
+  const [tab, setTab] = useState(abasPermitidas[0] || 'dashboard');
   const [modal, setModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [reportView, setReportView] = useState(null);
   const [taxasSub, setTaxasSub] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [alertaAtivo, setAlertaAtivo] = useState(null);   // compromisso exibido no popup
+  const [adiados, setAdiados] = useState({});              // id -> timestamp até quando ficar silenciado
 
   const reload = async () => {
     try {
@@ -366,6 +512,31 @@ export default function Home() {
 
   useEffect(() => { reload(); }, []);
 
+  // Verifica a cada 30s se alguma ação da agenda chegou na hora de alertar.
+  // Mostra uma ação por vez; ações adiadas ficam silenciadas até o horário escolhido.
+  useEffect(() => {
+    if (!data?.compromissos) return;
+    const verificar = () => {
+      if (alertaAtivo) return;
+      const agora = new Date();
+      const pendente = data.compromissos
+        .filter((c) => c.status === 'pendente' && !c.alertado)
+        .filter((c) => momentoAlerta(c) <= agora)
+        .filter((c) => !adiados[c.id] || adiados[c.id] <= agora.getTime())
+        .sort((a, b) => a.data_hora.localeCompare(b.data_hora))[0];
+      if (pendente) setAlertaAtivo(pendente);
+    };
+    verificar();
+    const timer = setInterval(verificar, 30000);
+    return () => clearInterval(timer);
+  }, [data, alertaAtivo, adiados]);
+
+  // Recarrega os dados periodicamente para captar ações criadas em outro dispositivo
+  useEffect(() => {
+    const timer = setInterval(() => { reload(); }, 300000); // a cada 5 min
+    return () => clearInterval(timer);
+  }, []);
+
   const withSave = async (fn) => {
     setSaving(true);
     try { await fn(); await reload(); } catch (e) { console.error(e); alert('Erro ao salvar. Tente novamente.'); }
@@ -374,6 +545,9 @@ export default function Home() {
 
   if (loading) return <CenterMsg text="Carregando…" />;
   if (errorMsg) return <CenterMsg text={errorMsg} error />;
+  if (abasPermitidas.length === 0) {
+    return <CenterMsg text="Seu usuário ainda não tem nenhuma aba liberada. Peça para um administrador liberar o acesso." onLogout={() => db.signOut()} />;
+  }
 
   const saldoTotal = data.bancos.reduce((s, b) => s + (Number(b.saldo) || 0), 0);
 
@@ -389,8 +563,11 @@ export default function Home() {
           <span>·</span>
           <span>{data.bancos.length} conta{data.bancos.length === 1 ? '' : 's'} bancária{data.bancos.length === 1 ? '' : 's'}</span>
           <button className="refresh-btn" onClick={reload} title="Atualizar"><RefreshCw size={13} /></button>
+          <button className="refresh-btn" onClick={() => db.signOut()} title="Sair"><LogOut size={13} /></button>
         </div>
       </header>
+
+      <div className="usuario-tag">{perfil.nome}{isAdmin ? ' · admin' : ''}</div>
 
       <main className="content">
         {tab === 'dashboard' && <Dashboard data={data} onGoReports={() => setTab('relatorios')} />}
@@ -403,7 +580,8 @@ export default function Home() {
             onEdit={(it) => setModal({ type: 'banco', item: it })}
             onDelete={(id, label) => setConfirmDelete({ type: 'banco', id, label })}
             onNewTransfer={() => setModal({ type: 'transferencia', item: null })}
-            onDeleteTransfer={(t) => withSave(() => db.excluirTransferencia(t, data.bancos))} />
+            onDeleteTransfer={(t) => withSave(() => db.excluirTransferencia(t, data.bancos))}
+            onEditDados={(it) => setModal({ type: 'dados-bancarios', item: it })} />
         )}
         {tab === 'contas' && (
           <ContasView data={data}
@@ -439,11 +617,24 @@ export default function Home() {
             onSaveMes={(v) => withSave(() => db.saveVendaMes(v))}
             onGoReport={() => { setTab('relatorios'); setReportView('vendas'); }} />
         )}
+        {tab === 'agenda' && (
+          <AgendaView data={data}
+            onEdit={(it) => setModal({ type: 'compromisso', item: it })}
+            onDelete={(id, label) => setConfirmDelete({ type: 'compromisso', id, label })}
+            onConcluir={(c) => withSave(() => db.concluirCompromisso(c.id))}
+            onReabrir={(c) => withSave(() => db.reabrirCompromisso(c.id))}
+            onProximoPasso={(c) => setModal({ type: 'proximo-passo', item: c })} />
+        )}
         {tab === 'relatorios' && <ReportsHome view={reportView} setView={setReportView} data={data} />}
+        {tab === 'usuarios' && isAdmin && (
+          <UsuariosView
+            usuarioAtualId={perfil.id}
+            onGoRefresh={reload} />
+        )}
       </main>
 
-      {['empresas', 'bancos', 'contas', 'emprestimos', 'seguros'].includes(tab) && (
-        <button className="fab" onClick={() => setModal({ type: tab === 'empresas' ? 'empresa' : tab === 'bancos' ? 'banco' : tab === 'contas' ? 'conta' : tab === 'emprestimos' ? 'emprestimo' : 'seguro', item: null })}>
+      {['empresas', 'bancos', 'contas', 'emprestimos', 'seguros', 'agenda'].includes(tab) && (
+        <button className="fab" onClick={() => setModal({ type: tab === 'empresas' ? 'empresa' : tab === 'bancos' ? 'banco' : tab === 'contas' ? 'conta' : tab === 'emprestimos' ? 'emprestimo' : tab === 'agenda' ? 'compromisso' : 'seguro', item: null })}>
           <Plus size={24} />
         </button>
       )}
@@ -451,6 +642,7 @@ export default function Home() {
       <nav className="tabbar">
         {[
           { key: 'dashboard', label: 'Geral', icon: LayoutDashboard },
+          { key: 'agenda', label: 'Agenda', icon: CalendarDays },
           { key: 'empresas', label: 'Empresas', icon: Building2 },
           { key: 'bancos', label: 'Bancos', icon: Landmark },
           { key: 'contas', label: 'A pagar', icon: CalendarClock },
@@ -459,7 +651,8 @@ export default function Home() {
           { key: 'seguros', label: 'Seguros', icon: Shield },
           { key: 'vendas', label: 'Vendas', icon: ShoppingCart },
           { key: 'relatorios', label: 'Relatórios', icon: FileBarChart },
-        ].map(({ key, label, icon: Icon }) => (
+          ...(isAdmin ? [{ key: 'usuarios', label: 'Usuários', icon: Users }] : []),
+        ].filter((t) => abasPermitidas.includes(t.key)).map(({ key, label, icon: Icon }) => (
           <button key={key} className={`tab ${tab === key ? 'active' : ''}`} onClick={() => { setTab(key); setReportView(null); setTaxasSub(null); }}>
             <Icon size={19} strokeWidth={tab === key ? 2.2 : 1.6} /><span>{label}</span>
           </button>
@@ -468,12 +661,15 @@ export default function Home() {
 
       {modal?.type === 'empresa' && <EmpresaForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveEmpresa(v); setModal(null); })} />}
       {modal?.type === 'banco' && <BancoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveBanco(v); setModal(null); })} />}
+      {modal?.type === 'dados-bancarios' && <DadosBancariosForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveDadosBancarios(v); setModal(null); })} />}
       {modal?.type === 'conta' && <ContaForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveConta(v); setModal(null); })} />}
       {modal?.type === 'emprestimo' && <EmprestimoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveEmprestimo(v, modal.item?.parcelas || []); setModal(null); })} />}
       {modal?.type === 'transferencia' && <TransferForm bancos={data.bancos} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.criarTransferencia(v, data.bancos); setModal(null); })} />}
       {modal?.type === 'cartao' && <CartaoTaxaForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveTaxaCartao(v); setModal(null); })} />}
       {modal?.type === 'boleto' && <BoletoTaxaForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveTaxaBoleto(v); setModal(null); })} />}
       {modal?.type === 'seguro' && <SeguroForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveSeguro(v); setModal(null); })} />}
+      {modal?.type === 'compromisso' && <CompromissoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveCompromisso(v); setModal(null); })} />}
+      {modal?.type === 'proximo-passo' && <ProximoPassoForm anterior={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.criarProximoPasso(modal.item, v); setModal(null); })} />}
 
       {confirmDelete && (
         <Modal title="Excluir registro" onClose={() => setConfirmDelete(null)}>
@@ -489,10 +685,37 @@ export default function Home() {
               if (type === 'cartao') await db.deleteTaxaCartao(id);
               if (type === 'boleto') await db.deleteTaxaBoleto(id);
               if (type === 'seguro') await db.deleteSeguro(id);
+              if (type === 'compromisso') await db.deleteCompromisso(id);
               setConfirmDelete(null);
             })}>Excluir</PrimaryButton>
           </div>
         </Modal>
+      )}
+
+      {alertaAtivo && (
+        <AlertaPopup
+          compromisso={alertaAtivo}
+          onAdiar={() => {
+            setAdiados((prev) => ({ ...prev, [alertaAtivo.id]: Date.now() + 10 * 60000 }));
+            setAlertaAtivo(null);
+          }}
+          onConcluir={() => {
+            const alvo = alertaAtivo;
+            setAlertaAtivo(null);
+            withSave(() => db.concluirCompromisso(alvo.id));
+          }}
+          onVerAgenda={() => {
+            const alvo = alertaAtivo;
+            setAlertaAtivo(null);
+            setTab('agenda');
+            db.marcarAlertado(alvo.id).then(reload).catch(() => {});
+          }}
+          onFechar={() => {
+            const alvo = alertaAtivo;
+            setAlertaAtivo(null);
+            db.marcarAlertado(alvo.id).then(reload).catch(() => {});
+          }}
+        />
       )}
 
       {saving && <div className="saving-overlay">Salvando…</div>}
@@ -508,6 +731,7 @@ export default function Home() {
         .saldo-total { font-family:'IBM Plex Mono',monospace; font-size:32px; font-weight:600; color:var(--text); }
         .header-meta { margin-top:8px; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-dim); }
         .refresh-btn { margin-left:auto; background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 6px; cursor:pointer; display:flex; }
+        .usuario-tag { padding:6px 20px 0; font-size:11.5px; color:var(--text-dim); }
         .content { flex:1; overflow-y:auto; padding-bottom:70px; }
         .fab { position:fixed; right:calc(50% - 260px + 20px); bottom:80px; width:52px; height:52px; border-radius:50%; background:var(--accent); color:var(--accent-contrast); border:none; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 18px var(--accent-shadow); cursor:pointer; z-index:10; }
         @media (max-width: 560px) { .fab { right:20px; } }
@@ -521,10 +745,13 @@ export default function Home() {
   );
 }
 
-function CenterMsg({ text, error }) {
+function CenterMsg({ text, error, onLogout }) {
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: error ? 'var(--danger)' : 'var(--text-dim)', fontFamily: 'Inter,sans-serif', padding: 24, textAlign: 'center' }}>
-      {text}
+    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'center', justifyContent: 'center', color: error ? 'var(--danger)' : 'var(--text-dim)', fontFamily: 'Inter,sans-serif', padding: 24, textAlign: 'center' }}>
+      <div>{text}</div>
+      {onLogout && (
+        <button onClick={onLogout} style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 13, fontWeight: 600, padding: '9px 16px', borderRadius: 9, cursor: 'pointer' }}>Sair</button>
+      )}
     </div>
   );
 }
@@ -542,6 +769,10 @@ function Dashboard({ data, onGoReports }) {
   const segurosVencendo = (data.seguros || [])
     .filter((s) => statusSeguro(s.vigencia_fim) !== 'vigente')
     .sort((a, b) => a.vigencia_fim.localeCompare(b.vigencia_fim))
+    .slice(0, 5);
+  const agendaProxima = (data.compromissos || [])
+    .filter((c) => c.status === 'pendente')
+    .sort((a, b) => a.data_hora.localeCompare(b.data_hora))
     .slice(0, 5);
 
   if (!data.empresas.length && !data.bancos.length) {
@@ -568,6 +799,27 @@ function Dashboard({ data, onGoReports }) {
                 <Bar dataKey="valor" fill="var(--accent)" radius={[0, 4, 4, 0]} barSize={16} />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        </>
+      )}
+
+      {agendaProxima.length > 0 && (
+        <>
+          <SectionTitle>Agenda · próximas ações</SectionTitle>
+          <div className="list">
+            {agendaProxima.map((c) => {
+              const atrasado = new Date(c.data_hora) < new Date();
+              return (
+                <div key={c.id} className="row">
+                  <div>
+                    <div>{c.tipo === 'obrigacao' ? <Shield size={12} style={{ marginRight: 5, verticalAlign: -1 }} /> : <CalendarDays size={12} style={{ marginRight: 5, verticalAlign: -1 }} />}{c.titulo}</div>
+                    <div className="row-sub" style={{ color: atrasado ? 'var(--danger)' : 'var(--text-dim)' }}>
+                      {fmtDataHora(c.data_hora)} · {descreveQuando(c.data_hora)}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -662,12 +914,90 @@ function EmpresasView({ data, onEdit, onDelete }) {
 
 // ---------- Bancos ----------
 
-function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer }) {
+function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer, onEditDados }) {
+  const [sub, setSub] = useState('saldos'); // saldos | dados
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
   const bancoNome = (id) => data.bancos.find((b) => b.id === id)?.nome_banco || '—';
   const transfers = [...data.transferencias].sort((a, b) => b.data.localeCompare(a.data));
+
+  const subTabs = (
+    <div className="sub-tabs">
+      <button className={sub === 'saldos' ? 'active' : ''} onClick={() => setSub('saldos')}>Saldos</button>
+      <button className={sub === 'dados' ? 'active' : ''} onClick={() => setSub('dados')}>Dados bancários</button>
+      <style jsx>{`
+        .sub-tabs { display:flex; gap:6px; margin-bottom:12px; }
+        .sub-tabs button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer; }
+        .sub-tabs button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </div>
+  );
+
+  if (sub === 'dados') {
+    // Agrupa as contas bancárias por empresa
+    const grupos = data.empresas
+      .map((emp) => ({ empresa: emp, bancos: data.bancos.filter((b) => b.empresa_id === emp.id) }))
+      .filter((g) => g.bancos.length > 0);
+
+    return (
+      <div className="view">
+        {subTabs}
+        {grupos.length === 0 ? (
+          <EmptyState icon={Landmark} text="Nenhum banco cadastrado. Volte em 'Saldos' e toque em + para adicionar." />
+        ) : grupos.map((g) => (
+          <div key={g.empresa.id} className="empresa-block">
+            <div className="empresa-head"><Building2 size={14} /> {g.empresa.nome}</div>
+            {g.bancos.map((b) => (
+              <div key={b.id} className="card">
+                <div className="card-head">
+                  <div className="card-title"><Landmark size={16} /> {b.nome_banco}</div>
+                  <div className="card-actions">
+                    <button className="icon-btn" onClick={() => onEditDados({
+                      id: b.id, nomeBanco: b.nome_banco, agencia: b.agencia, conta: b.conta,
+                      limiteConta: b.limite_conta, limitePagamento: b.limite_pagamento,
+                      limitePix: b.limite_pix, limiteContaCadastrada: b.limite_conta_cadastrada,
+                      gerenteNome: b.gerente_nome, gerenteContato: b.gerente_contato,
+                    })}><Pencil size={16} /></button>
+                  </div>
+                </div>
+                <div className="card-grid">
+                  <div><span className="k">Agência</span><span className="v mono">{b.agencia || '—'}</span></div>
+                  <div><span className="k">Conta</span><span className="v mono">{b.conta || '—'}</span></div>
+                </div>
+                <div className="limites-grid">
+                  <div><span className="k">Limite da conta</span><span className="v mono">{b.limite_conta != null ? fmtBRL(b.limite_conta) : '—'}</span></div>
+                  <div><span className="k">Limite de pagamento</span><span className="v mono">{b.limite_pagamento != null ? fmtBRL(b.limite_pagamento) : '—'}</span></div>
+                  <div><span className="k">Limite de Pix</span><span className="v mono">{b.limite_pix != null ? fmtBRL(b.limite_pix) : '—'}</span></div>
+                  <div><span className="k">Limite conta cadastrada</span><span className="v mono">{b.limite_conta_cadastrada != null ? fmtBRL(b.limite_conta_cadastrada) : '—'}</span></div>
+                </div>
+                {(b.gerente_nome || b.gerente_contato) && (
+                  <div className="gerente-box">
+                    <span className="k">Gerente da conta</span>
+                    <div className="gerente-linha">
+                      <span className="v">{b.gerente_nome || '—'}</span>
+                      {b.gerente_contato && <span className="gerente-contato">{b.gerente_contato}</span>}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+        <style jsx>{`
+          .empresa-block { display:flex; flex-direction:column; gap:10px; margin-bottom:8px; }
+          .empresa-head { display:flex; align-items:center; gap:6px; font-family:'Space Grotesk',sans-serif; font-size:13.5px; color:var(--accent); font-weight:600; }
+          .limites-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+          .gerente-box { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+          .gerente-linha { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+          .gerente-contato { font-size:13px; color:var(--accent); font-family:'IBM Plex Mono',monospace; }
+        `}</style>
+        <ViewStyle />
+      </div>
+    );
+  }
+
   return (
     <div className="view">
+      {subTabs}
       {data.bancos.length >= 2 && (
         <button className="transfer-btn" onClick={onNewTransfer}><ArrowLeftRight size={16} /> Nova transferência entre bancos</button>
       )}
@@ -713,6 +1043,45 @@ function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer })
       `}</style>
       <ViewStyle />
     </div>
+  );
+}
+
+function DadosBancariosForm({ item, onClose, onSave }) {
+  const [agencia, setAgencia] = useState(item?.agencia || '');
+  const [conta, setConta] = useState(item?.conta || '');
+  const [limiteConta, setLimiteConta] = useState(item?.limiteConta ?? '');
+  const [limitePagamento, setLimitePagamento] = useState(item?.limitePagamento ?? '');
+  const [limitePix, setLimitePix] = useState(item?.limitePix ?? '');
+  const [limiteContaCadastrada, setLimiteContaCadastrada] = useState(item?.limiteContaCadastrada ?? '');
+  const [gerenteNome, setGerenteNome] = useState(item?.gerenteNome || '');
+  const [gerenteContato, setGerenteContato] = useState(item?.gerenteContato || '');
+
+  const num = (v) => (v === '' || v === null || v === undefined ? null : parseFloat(v));
+
+  return (
+    <Modal title={`Dados bancários · ${item?.nomeBanco || ''}`} onClose={onClose}>
+      <Field label="Agência"><input className="input" value={agencia} onChange={(e) => setAgencia(e.target.value)} placeholder="Ex: 1234-5" /></Field>
+      <Field label="Conta"><input className="input" value={conta} onChange={(e) => setConta(e.target.value)} placeholder="Ex: 12345-6" /></Field>
+
+      <SectionTitle>Limites</SectionTitle>
+      <Field label="Limite da conta (R$)"><DecimalMaskInput value={limiteConta} onChange={setLimiteConta} /></Field>
+      <Field label="Limite de pagamento (R$)"><DecimalMaskInput value={limitePagamento} onChange={setLimitePagamento} /></Field>
+      <Field label="Limite de Pix (R$)"><DecimalMaskInput value={limitePix} onChange={setLimitePix} /></Field>
+      <Field label="Limite conta cadastrada (R$)"><DecimalMaskInput value={limiteContaCadastrada} onChange={setLimiteContaCadastrada} /></Field>
+
+      <SectionTitle>Gerente da conta</SectionTitle>
+      <Field label="Nome do gerente"><input className="input" value={gerenteNome} onChange={(e) => setGerenteNome(e.target.value)} placeholder="Nome completo" /></Field>
+      <Field label="Contato do gerente"><input className="input" value={gerenteContato} onChange={(e) => setGerenteContato(e.target.value)} placeholder="Telefone ou e-mail" /></Field>
+
+      <PrimaryButton full onClick={() => onSave({
+        id: item.id,
+        agencia: agencia.trim(), conta: conta.trim(),
+        limiteConta: num(limiteConta), limitePagamento: num(limitePagamento),
+        limitePix: num(limitePix), limiteContaCadastrada: num(limiteContaCadastrada),
+        gerenteNome: gerenteNome.trim(), gerenteContato: gerenteContato.trim(),
+      })}>Salvar dados bancários</PrimaryButton>
+      <style jsx>{inputCss}</style>
+    </Modal>
   );
 }
 
@@ -1015,17 +1384,430 @@ function SeguroForm({ item, empresas, onClose, onSave }) {
   );
 }
 
+// ---------- Agenda (compromissos e obrigações) ----------
+
+function tipoLabel(v) { return TIPOS_COMPROMISSO.find((t) => t.value === v)?.label || v; }
+function alertaLabel(v) { return OPCOES_ALERTA.find((o) => o.value === v)?.label || `${v} min antes`; }
+
+function AgendaView({ data, onNovo, onEdit, onDelete, onConcluir, onReabrir, onProximoPasso }) {
+  const [filtro, setFiltro] = useState('pendentes'); // pendentes | hoje | concluidos | todos
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || null;
+
+  const lista = useMemo(() => {
+    const todos = [...(data.compromissos || [])];
+    const hojeStr = todayISO();
+    const filtrados = todos.filter((c) => {
+      if (filtro === 'pendentes') return c.status === 'pendente';
+      if (filtro === 'concluidos') return c.status === 'concluido';
+      if (filtro === 'hoje') return c.status === 'pendente' && new Date(c.data_hora).toISOString().slice(0, 10) === hojeStr;
+      return true;
+    });
+    return filtrados.sort((a, b) => filtro === 'concluidos'
+      ? (b.concluido_em || '').localeCompare(a.concluido_em || '')
+      : a.data_hora.localeCompare(b.data_hora));
+  }, [data.compromissos, filtro]);
+
+  const pendentes = (data.compromissos || []).filter((c) => c.status === 'pendente');
+  const atrasados = pendentes.filter((c) => new Date(c.data_hora) < new Date()).length;
+
+  return (
+    <div className="view">
+      <div className="seg-filter">
+        <button className={filtro === 'pendentes' ? 'active' : ''} onClick={() => setFiltro('pendentes')}>Pendentes</button>
+        <button className={filtro === 'hoje' ? 'active' : ''} onClick={() => setFiltro('hoje')}>Hoje</button>
+        <button className={filtro === 'concluidos' ? 'active' : ''} onClick={() => setFiltro('concluidos')}>Concluídos</button>
+        <button className={filtro === 'todos' ? 'active' : ''} onClick={() => setFiltro('todos')}>Todos</button>
+      </div>
+
+      {atrasados > 0 && filtro !== 'concluidos' && (
+        <div className="alerta-atrasados"><AlertCircle size={15} /> {atrasados} {atrasados === 1 ? 'ação atrasada' : 'ações atrasadas'}</div>
+      )}
+
+      {lista.length === 0 ? (
+        <EmptyState icon={CalendarDays} text={filtro === 'concluidos' ? 'Nenhuma ação concluída ainda.' : 'Nenhuma ação na agenda. Toque em + para adicionar.'} />
+      ) : lista.map((c) => {
+        const atrasado = c.status === 'pendente' && new Date(c.data_hora) < new Date();
+        const anterior = c.anterior_id ? (data.compromissos || []).find((x) => x.id === c.anterior_id) : null;
+        return (
+          <div key={c.id} className={`card ${c.status === 'concluido' ? 'concluido' : ''}`}>
+            <div className="card-head">
+              <div className="card-title">
+                {c.tipo === 'obrigacao' ? <Shield size={16} /> : <CalendarDays size={16} />} {c.titulo}
+                <span className={`badge ${c.tipo === 'obrigacao' ? 'badge-alt' : ''}`}>{tipoLabel(c.tipo)}</span>
+              </div>
+              <div className="card-actions">
+                <button className="icon-btn" onClick={() => onEdit({
+                  id: c.id, empresaId: c.empresa_id, titulo: c.titulo, descricao: c.descricao, tipo: c.tipo,
+                  dataHora: c.data_hora, alertaMinutos: c.alerta_minutos, proximoPasso: c.proximo_passo, anteriorId: c.anterior_id,
+                })}><Pencil size={16} /></button>
+                <button className="icon-btn danger" onClick={() => onDelete(c.id, c.titulo)}><Trash2 size={16} /></button>
+              </div>
+            </div>
+
+            {anterior && (
+              <div className="continuidade"><ArrowRight size={12} /> continuação de: {anterior.titulo}</div>
+            )}
+
+            <div className="card-grid">
+              <div><span className="k">Quando</span><span className="v" style={{ color: atrasado ? 'var(--danger)' : undefined }}>{fmtDataHora(c.data_hora)}</span></div>
+              <div><span className="k">Alerta</span><span className="v">{alertaLabel(c.alerta_minutos)}</span></div>
+              {empresaNome(c.empresa_id) && <div><span className="k">Empresa</span><span className="v">{empresaNome(c.empresa_id)}</span></div>}
+              {c.status === 'pendente' && <div><span className="k">Prazo</span><span className="v" style={{ color: atrasado ? 'var(--danger)' : 'var(--text-muted)' }}>{descreveQuando(c.data_hora)}</span></div>}
+            </div>
+
+            {c.descricao && <p className="descricao">{c.descricao}</p>}
+            {c.proximo_passo && (
+              <div className="proximo-passo"><span className="k">Próximo passo</span><span className="v">{c.proximo_passo}</span></div>
+            )}
+
+            <div className="acoes-row">
+              {c.status === 'pendente' ? (
+                <>
+                  <button className="acao-btn concluir" onClick={() => onConcluir(c)}><CheckCircle2 size={14} /> Concluir</button>
+                  <button className="acao-btn" onClick={() => onProximoPasso(c)}><ArrowRight size={14} /> Criar próximo passo</button>
+                </>
+              ) : (
+                <>
+                  <span className="concluido-tag"><CheckCircle2 size={14} /> Concluído em {fmtDataHora(c.concluido_em)}</span>
+                  <button className="acao-btn" onClick={() => onReabrir(c)}>Reabrir</button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      <style jsx>{`
+        .seg-filter { display:flex; gap:6px; margin-bottom:10px; }
+        .seg-filter button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:9px 6px; border-radius:8px; cursor:pointer; }
+        .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .alerta-atrasados { display:flex; align-items:center; gap:7px; background:var(--danger-soft-12); color:var(--danger); font-size:12.5px; font-weight:600; padding:10px 12px; border-radius:9px; margin-bottom:4px; }
+        .card.concluido { opacity:0.72; }
+        .continuidade { display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--accent); margin-bottom:8px; }
+        .descricao { margin:10px 0 0; font-size:13px; color:var(--text-muted); line-height:1.5; }
+        .proximo-passo { margin-top:10px; padding:9px 11px; background:var(--accent-soft-10); border-radius:8px; }
+        .acoes-row { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; align-items:center; }
+        .acao-btn { display:inline-flex; align-items:center; gap:5px; background:var(--surface-alt); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:7px 11px; border-radius:8px; cursor:pointer; }
+        .acao-btn.concluir { background:var(--success-soft-15); border-color:transparent; color:var(--success); }
+        .concluido-tag { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--success); font-weight:600; }
+      `}</style>
+      <ViewStyle />
+    </div>
+  );
+}
+
+function CompromissoForm({ item, empresas, onClose, onSave }) {
+  const [titulo, setTitulo] = useState(item?.titulo || '');
+  const [descricao, setDescricao] = useState(item?.descricao || '');
+  const [tipo, setTipo] = useState(item?.tipo || 'compromisso');
+  const [dataHora, setDataHora] = useState(toDatetimeLocal(item?.dataHora));
+  const [alertaMinutos, setAlertaMinutos] = useState(item?.alertaMinutos ?? 30);
+  const [empresaId, setEmpresaId] = useState(item?.empresaId || '');
+  const [proximoPasso, setProximoPasso] = useState(item?.proximoPasso || '');
+
+  const canSave = titulo.trim() && dataHora;
+
+  return (
+    <Modal title={item ? 'Editar ação' : 'Nova ação na agenda'} onClose={onClose}>
+      <Field label="Tipo">
+        <div className="tipo-toggle">
+          {TIPOS_COMPROMISSO.map((t) => (
+            <button type="button" key={t.value} className={tipo === t.value ? 'active' : ''} onClick={() => setTipo(t.value)}>{t.label}</button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Ação / título"><input className="input" value={titulo} onChange={(e) => setTitulo(e.target.value)} placeholder="Ex: Entregar DCTF, reunião com contador..." autoFocus /></Field>
+      <Field label="Data e hora"><input className="input" type="datetime-local" value={dataHora} onChange={(e) => setDataHora(e.target.value)} /></Field>
+      <Field label="Avisar com antecedência">
+        <select className="select" value={alertaMinutos} onChange={(e) => setAlertaMinutos(parseInt(e.target.value, 10))}>
+          {OPCOES_ALERTA.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </Field>
+      <Field label="Empresa (opcional)">
+        <select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
+          <option value="">Nenhuma / geral</option>
+          {empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+      </Field>
+      <Field label="Detalhes (opcional)">
+        <textarea className="input textarea" value={descricao} onChange={(e) => setDescricao(e.target.value)} rows={3} placeholder="Observações sobre essa ação..." />
+      </Field>
+      <Field label="Próximo passo previsto (opcional)">
+        <input className="input" value={proximoPasso} onChange={(e) => setProximoPasso(e.target.value)} placeholder="O que vem depois dessa ação" />
+      </Field>
+      <PrimaryButton full onClick={() => canSave && onSave({
+        id: item?.id, empresaId, titulo: titulo.trim(), descricao: descricao.trim(), tipo,
+        dataHora: new Date(dataHora).toISOString(), alertaMinutos,
+        proximoPasso: proximoPasso.trim(), anteriorId: item?.anteriorId,
+      })}>{item ? 'Salvar alterações' : 'Salvar ação'}</PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .textarea { resize:vertical; font-family:'Inter',sans-serif; }
+      `}</style>
+    </Modal>
+  );
+}
+
+// Modal para encadear a próxima ação a partir de uma ação existente
+function ProximoPassoForm({ anterior, onClose, onSave }) {
+  const [titulo, setTitulo] = useState(anterior?.proximo_passo || '');
+  const [dataHora, setDataHora] = useState(toDatetimeLocal());
+  const [alertaMinutos, setAlertaMinutos] = useState(30);
+  const [descricao, setDescricao] = useState('');
+  const canSave = titulo.trim() && dataHora;
+
+  return (
+    <Modal title="Próximo passo" onClose={onClose}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>
+        Continuação de: <strong style={{ color: 'var(--text)' }}>{anterior.titulo}</strong>
+      </p>
+      <Field label="Próxima ação"><input className="input" value={titulo} onChange={(e) => setTitulo(e.target.value)} placeholder="O que precisa ser feito em seguida" autoFocus /></Field>
+      <Field label="Data e hora"><input className="input" type="datetime-local" value={dataHora} onChange={(e) => setDataHora(e.target.value)} /></Field>
+      <Field label="Avisar com antecedência">
+        <select className="select" value={alertaMinutos} onChange={(e) => setAlertaMinutos(parseInt(e.target.value, 10))}>
+          {OPCOES_ALERTA.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </Field>
+      <Field label="Detalhes (opcional)">
+        <textarea className="input textarea" value={descricao} onChange={(e) => setDescricao(e.target.value)} rows={2} />
+      </Field>
+      <PrimaryButton full onClick={() => canSave && onSave({
+        titulo: titulo.trim(), dataHora: new Date(dataHora).toISOString(), alertaMinutos, descricao: descricao.trim(),
+      })}>Criar próximo passo</PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`.textarea { resize:vertical; font-family:'Inter',sans-serif; }`}</style>
+    </Modal>
+  );
+}
+
+// Popup que aparece na tela quando chega a hora de uma ação
+function AlertaPopup({ compromisso, onAdiar, onConcluir, onVerAgenda, onFechar }) {
+  const atrasado = new Date(compromisso.data_hora) < new Date();
+  return (
+    <div className="alerta-backdrop">
+      <div className="alerta-box">
+        <div className="alerta-head">
+          <div className="sino"><Bell size={20} /></div>
+          <div>
+            <div className="alerta-tipo">{tipoLabel(compromisso.tipo)}{atrasado ? ' · atrasado' : ''}</div>
+            <div className="alerta-titulo">{compromisso.titulo}</div>
+          </div>
+        </div>
+        <div className="alerta-quando"><Clock size={14} /> {fmtDataHora(compromisso.data_hora)}</div>
+        {compromisso.descricao && <p className="alerta-desc">{compromisso.descricao}</p>}
+        {compromisso.proximo_passo && (
+          <div className="alerta-proximo"><span className="rotulo">Próximo passo</span>{compromisso.proximo_passo}</div>
+        )}
+        <div className="alerta-botoes">
+          <GhostButton full onClick={onAdiar}>Lembrar em 10 min</GhostButton>
+          <PrimaryButton full onClick={onConcluir}>Concluir</PrimaryButton>
+        </div>
+        <button className="alerta-link" onClick={onVerAgenda}>Ver na agenda</button>
+        <button className="alerta-x" onClick={onFechar}><X size={18} /></button>
+      </div>
+      <style jsx>{`
+        .alerta-backdrop { position:fixed; inset:0; background:rgba(8,10,14,0.55); display:flex; align-items:center; justify-content:center; z-index:100; padding:16px; }
+        .alerta-box { position:relative; background:var(--surface); border:1px solid var(--border); border-radius:14px; width:100%; max-width:420px; padding:22px; box-shadow:0 16px 40px rgba(27,39,51,0.24); animation:pop .18s ease-out; }
+        @keyframes pop { from { transform:scale(0.96); opacity:0; } to { transform:scale(1); opacity:1; } }
+        .alerta-head { display:flex; align-items:flex-start; gap:12px; margin-bottom:14px; }
+        .sino { width:40px; height:40px; border-radius:10px; background:var(--warning-soft-15); color:var(--warning); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .alerta-tipo { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-dim); font-weight:600; }
+        .alerta-titulo { font-family:'Space Grotesk',sans-serif; font-size:17px; color:var(--text); font-weight:600; margin-top:2px; }
+        .alerta-quando { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-muted); margin-bottom:10px; }
+        .alerta-desc { font-size:13px; color:var(--text-muted); line-height:1.5; margin:0 0 10px; }
+        .alerta-proximo { background:var(--accent-soft-10); border-radius:8px; padding:10px 12px; font-size:13px; color:var(--text); margin-bottom:14px; }
+        .alerta-proximo .rotulo { display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; margin-bottom:3px; }
+        .alerta-botoes { display:flex; gap:10px; margin-top:16px; }
+        .alerta-link { display:block; width:100%; background:none; border:none; color:var(--accent); font-size:12.5px; font-weight:600; padding:12px 0 0; cursor:pointer; }
+        .alerta-x { position:absolute; top:14px; right:14px; background:none; border:none; color:var(--text-dim); cursor:pointer; padding:4px; display:flex; }
+      `}</style>
+    </div>
+  );
+}
+
+// ---------- Usuários (admin) ----------
+
+function UsuariosView({ usuarioAtualId, onGoRefresh }) {
+  const [usuarios, setUsuarios] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [modal, setModal] = useState(null); // { type: 'novo'|'editar'|'senha', item }
+  const [confirmExcluir, setConfirmExcluir] = useState(null);
+  const [processando, setProcessando] = useState(false);
+
+  const carregar = () => {
+    db.fetchPerfis().then(setUsuarios).catch((e) => setErro(e.message || 'Erro ao carregar usuários.'));
+  };
+  useEffect(() => { carregar(); }, []);
+
+  const executar = async (fn) => {
+    setProcessando(true);
+    try { await fn(); carregar(); setModal(null); setConfirmExcluir(null); }
+    catch (e) { alert(e.message || 'Erro na operação.'); }
+    setProcessando(false);
+  };
+
+  if (erro) return <EmptyState icon={Users} text={erro} />;
+  if (!usuarios) return <div className="view"><p className="muted2">Carregando usuários…</p></div>;
+
+  return (
+    <div className="view">
+      <button className="add-inline-btn" style={{ marginBottom: 12 }} onClick={() => setModal({ type: 'novo' })}><Plus size={15} /> Novo usuário</button>
+
+      {usuarios.map((u) => (
+        <div key={u.id} className="card">
+          <div className="card-head">
+            <div className="card-title">
+              <Users size={16} /> {u.nome}
+              <span className={`badge ${u.papel === 'admin' ? 'badge-alt' : ''}`}>{u.papel === 'admin' ? 'Administrador' : 'Usuário'}</span>
+            </div>
+            <div className="card-actions">
+              <button className="icon-btn" onClick={() => setModal({ type: 'editar', item: u })}><Pencil size={16} /></button>
+              <button className="icon-btn" onClick={() => setModal({ type: 'senha', item: u })}><KeyRound size={16} /></button>
+              {u.id !== usuarioAtualId && (
+                <button className="icon-btn danger" onClick={() => setConfirmExcluir(u)}><Trash2 size={16} /></button>
+              )}
+            </div>
+          </div>
+          <div className="card-grid">
+            <div><span className="k">E-mail</span><span className="v">{u.email}</span></div>
+            <div><span className="k">Abas liberadas</span><span className="v">{u.papel === 'admin' ? 'Todas' : (u.abas?.length ? u.abas.map((a) => ABAS_SISTEMA.find((x) => x.key === a)?.label || a).join(', ') : 'Nenhuma')}</span></div>
+          </div>
+        </div>
+      ))}
+
+      {modal?.type === 'novo' && <UsuarioNovoForm onClose={() => setModal(null)} onSave={(v) => executar(() => db.criarUsuario(v))} processando={processando} />}
+      {modal?.type === 'editar' && <UsuarioEditarForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => executar(() => db.updatePerfil(v))} processando={processando} />}
+      {modal?.type === 'senha' && <UsuarioSenhaForm item={modal.item} onClose={() => setModal(null)} onSave={(novaSenha) => executar(() => db.redefinirSenha(modal.item.id, novaSenha))} processando={processando} />}
+
+      {confirmExcluir && (
+        <Modal title="Excluir usuário" onClose={() => setConfirmExcluir(null)}>
+          <p style={{ color: 'var(--text-muted)', fontSize: 14, margin: 0 }}>
+            Tem certeza que deseja excluir o acesso de <strong style={{ color: 'var(--text)' }}>{confirmExcluir.nome}</strong>? Essa ação não pode ser desfeita.
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <GhostButton full onClick={() => setConfirmExcluir(null)}>Cancelar</GhostButton>
+            <PrimaryButton full tone="danger" onClick={() => executar(() => db.excluirUsuario(confirmExcluir.id))}>Excluir</PrimaryButton>
+          </div>
+        </Modal>
+      )}
+      <ViewStyle />
+    </div>
+  );
+}
+
+function AbasChecklist({ abas, onChange }) {
+  const toggle = (key) => onChange(abas.includes(key) ? abas.filter((a) => a !== key) : [...abas, key]);
+  return (
+    <div className="abas-checklist">
+      {ABAS_SISTEMA.map((a) => (
+        <button type="button" key={a.key} className={abas.includes(a.key) ? 'on' : ''} onClick={() => toggle(a.key)}>{a.label}</button>
+      ))}
+      <style jsx>{`
+        .abas-checklist { display:flex; flex-wrap:wrap; gap:6px; }
+        .abas-checklist button { background:var(--surface); border:1px solid var(--border); color:var(--text-dim); font-size:12px; font-weight:600; padding:7px 10px; border-radius:20px; cursor:pointer; }
+        .abas-checklist button.on { background:var(--accent-soft-10); border-color:var(--accent); color:var(--accent); }
+      `}</style>
+    </div>
+  );
+}
+
+function UsuarioNovoForm({ onClose, onSave, processando }) {
+  const [nome, setNome] = useState('');
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [papel, setPapel] = useState('usuario');
+  const [abas, setAbas] = useState([]);
+  const canSave = nome.trim() && email.trim() && senha.length >= 6;
+
+  return (
+    <Modal title="Novo usuário" onClose={onClose}>
+      <Field label="Nome"><input className="input" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome completo" autoFocus /></Field>
+      <Field label="E-mail"><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@exemplo.com" /></Field>
+      <Field label="Senha provisória"><input className="input" type="text" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="Mínimo 6 caracteres" /></Field>
+      <Field label="Papel">
+        <div className="tipo-toggle">
+          <button type="button" className={papel === 'usuario' ? 'active' : ''} onClick={() => setPapel('usuario')}>Usuário comum</button>
+          <button type="button" className={papel === 'admin' ? 'active' : ''} onClick={() => setPapel('admin')}>Administrador</button>
+        </div>
+      </Field>
+      {papel === 'usuario' && (
+        <Field label="Abas liberadas"><AbasChecklist abas={abas} onChange={setAbas} /></Field>
+      )}
+      {papel === 'admin' && <p className="muted2">Administradores enxergam todas as abas automaticamente.</p>}
+      <PrimaryButton full onClick={() => canSave && onSave({ nome: nome.trim(), email: email.trim(), senha, papel, abas })}>
+        {processando ? 'Criando…' : 'Criar usuário'}
+      </PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </Modal>
+  );
+}
+
+function UsuarioEditarForm({ item, onClose, onSave, processando }) {
+  const [nome, setNome] = useState(item.nome);
+  const [papel, setPapel] = useState(item.papel);
+  const [abas, setAbas] = useState(item.abas || []);
+
+  return (
+    <Modal title={`Editar ${item.nome}`} onClose={onClose}>
+      <Field label="Nome"><input className="input" value={nome} onChange={(e) => setNome(e.target.value)} /></Field>
+      <Field label="Papel">
+        <div className="tipo-toggle">
+          <button type="button" className={papel === 'usuario' ? 'active' : ''} onClick={() => setPapel('usuario')}>Usuário comum</button>
+          <button type="button" className={papel === 'admin' ? 'active' : ''} onClick={() => setPapel('admin')}>Administrador</button>
+        </div>
+      </Field>
+      {papel === 'usuario' && (
+        <Field label="Abas liberadas"><AbasChecklist abas={abas} onChange={setAbas} /></Field>
+      )}
+      {papel === 'admin' && <p className="muted2">Administradores enxergam todas as abas automaticamente.</p>}
+      <PrimaryButton full onClick={() => onSave({ id: item.id, nome: nome.trim(), papel, abas })}>
+        {processando ? 'Salvando…' : 'Salvar alterações'}
+      </PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </Modal>
+  );
+}
+
+function UsuarioSenhaForm({ item, onClose, onSave, processando }) {
+  const [senha, setSenha] = useState('');
+  return (
+    <Modal title={`Redefinir senha · ${item.nome}`} onClose={onClose}>
+      <Field label="Nova senha provisória"><input className="input" type="text" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="Mínimo 6 caracteres" autoFocus /></Field>
+      <PrimaryButton full onClick={() => senha.length >= 6 && onSave(senha)}>{processando ? 'Salvando…' : 'Redefinir senha'}</PrimaryButton>
+      <style jsx>{inputCss}</style>
+    </Modal>
+  );
+}
+
 // ---------- Vendas ----------
 
 function setorLabel(v) { return SETORES_VENDA.find((s) => s.value === v)?.label || v; }
 
 function VendasView({ data, onSaveMes, onGoReport }) {
+  const [subTela, setSubTela] = useState('lancamentos'); // lancamentos | comparativo
   const [empresaId, setEmpresaId] = useState(data.empresas[0]?.id || '');
   const [setor, setSetor] = useState(SETORES_VENDA[0].value);
   const [ano, setAno] = useState(new Date().getFullYear());
   const [editMes, setEditMes] = useState(null); // número do mês (1-12) sendo editado
 
   if (!data.empresas.length) return <EmptyState icon={ShoppingCart} text="Cadastre uma empresa antes de lançar vendas." />;
+
+  if (subTela === 'comparativo') {
+    return <VendasComparativo data={data} onVoltar={() => setSubTela('lancamentos')} />;
+  }
 
   const registros = (data.vendas || []).filter((v) => v.empresa_id === empresaId && v.setor === setor && v.ano === ano);
   const porMes = (mes) => registros.find((v) => v.mes === mes);
@@ -1035,6 +1817,11 @@ function VendasView({ data, onSaveMes, onGoReport }) {
 
   return (
     <div className="view">
+      <div className="sub-tabs">
+        <button className="active">Lançamentos</button>
+        <button onClick={() => setSubTela('comparativo')}>Comparativo</button>
+      </div>
+
       <div className="vendas-filtros">
         <select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
           {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
@@ -1096,6 +1883,9 @@ function VendasView({ data, onSaveMes, onGoReport }) {
 
       <style jsx>{`
         .vendas-filtros { display:flex; gap:8px; margin-bottom:10px; }
+        .sub-tabs { display:flex; gap:6px; margin-bottom:12px; }
+        .sub-tabs button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer; }
+        .sub-tabs button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
         .seg-filter { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
         .seg-filter button { flex:1 1 30%; min-width:90px; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:9px 6px; border-radius:8px; cursor:pointer; }
         .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
@@ -1109,6 +1899,176 @@ function VendasView({ data, onSaveMes, onGoReport }) {
       `}</style>
       <style jsx>{inputCss}</style>
       <ViewStyle />
+    </div>
+  );
+}
+
+const CORES_COMPARATIVO = ['#1F3A5F', '#2C7A57', '#B8860B', '#B3413E', '#5B6B7C', '#7B4F9D'];
+
+function VendasComparativo({ data, onVoltar }) {
+  const [modo, setModo] = useState('mes'); // mes (12 meses de um ano) | ano (evolução anual)
+  const [empresaId, setEmpresaId] = useState('todas');
+  const [ano, setAno] = useState(new Date().getFullYear());
+  const [anoDe, setAnoDe] = useState(Math.max(ANO_INICIAL_VENDAS, new Date().getFullYear() - 4));
+  const [anoAte, setAnoAte] = useState(new Date().getFullYear());
+  const [setoresSel, setSetoresSel] = useState(SETORES_VENDA.map((s) => s.value));
+
+  const toggleSetor = (v) => setSetoresSel((prev) => prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]);
+
+  const base = (data.vendas || []).filter((v) => empresaId === 'todas' || v.empresa_id === empresaId);
+
+  // Modo "mês a mês": eixo X = meses do ano escolhido, uma barra por setor
+  // Modo "ano a ano": eixo X = anos do intervalo, uma barra por setor
+  const chartData = useMemo(() => {
+    if (modo === 'mes') {
+      return MESES.map((nome, i) => {
+        const linha = { name: nome.slice(0, 3) };
+        setoresSel.forEach((s) => {
+          linha[s] = base
+            .filter((v) => v.ano === ano && v.mes === i + 1 && v.setor === s)
+            .reduce((acc, v) => acc + (Number(v.valor) || 0), 0);
+        });
+        return linha;
+      });
+    }
+    const anos = [];
+    for (let y = anoDe; y <= anoAte; y++) anos.push(y);
+    return anos.map((y) => {
+      const linha = { name: String(y) };
+      setoresSel.forEach((s) => {
+        linha[s] = base
+          .filter((v) => v.ano === y && v.setor === s)
+          .reduce((acc, v) => acc + (Number(v.valor) || 0), 0);
+      });
+      return linha;
+    });
+  }, [base, modo, ano, anoDe, anoAte, setoresSel]);
+
+  // Totais por setor no período selecionado, para a tabela comparativa
+  const totaisPorSetor = setoresSel.map((s) => ({
+    setor: s,
+    total: chartData.reduce((acc, linha) => acc + (Number(linha[s]) || 0), 0),
+  })).sort((a, b) => b.total - a.total);
+  const totalGeral = totaisPorSetor.reduce((s, x) => s + x.total, 0);
+
+  const exportar = (tipo) => {
+    const colunas = [
+      { header: modo === 'mes' ? 'Mês' : 'Ano', get: (l) => l.name, width: 14 },
+      ...setoresSel.map((s) => ({ header: setorLabel(s), get: (l) => Number(l[s]) || 0, width: 16 })),
+    ];
+    const titulo = modo === 'mes'
+      ? `Comparativo de Vendas por Setor · ${ano}`
+      : `Comparativo de Vendas por Setor · ${anoDe}–${anoAte}`;
+    const grupos = [{ label: empresaId === 'todas' ? 'Todas as empresas' : (data.empresas.find((e) => e.id === empresaId)?.nome || ''), rows: chartData }];
+    if (tipo === 'excel') {
+      exportGroupedExcel({ groups: grupos, columns: colunas, valueColIndex: null, sheetName: 'Comparativo', fileName: 'comparativo-vendas', reportTitle: titulo });
+    } else {
+      exportToPDF({ title: titulo, groups: grupos, columns: colunas, valueColIndex: null, fileName: 'comparativo-vendas' });
+    }
+  };
+
+  return (
+    <div className="view">
+      <div className="sub-tabs">
+        <button onClick={onVoltar}>Lançamentos</button>
+        <button className="active">Comparativo</button>
+      </div>
+
+      <div className="seg-filter modo-filter">
+        <button className={modo === 'mes' ? 'active' : ''} onClick={() => setModo('mes')}>Mês a mês</button>
+        <button className={modo === 'ano' ? 'active' : ''} onClick={() => setModo('ano')}>Ano a ano</button>
+      </div>
+
+      <div className="vendas-filtros">
+        <select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
+          <option value="todas">Todas as empresas</option>
+          {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+        {modo === 'mes' ? (
+          <select className="select" value={ano} onChange={(e) => setAno(parseInt(e.target.value, 10))}>
+            {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
+        ) : (
+          <>
+            <select className="select" value={anoDe} onChange={(e) => setAnoDe(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().slice().reverse().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+            <select className="select" value={anoAte} onChange={(e) => setAnoAte(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </>
+        )}
+      </div>
+
+      <div className="setores-check">
+        {SETORES_VENDA.map((s, i) => (
+          <button key={s.value} className={setoresSel.includes(s.value) ? 'on' : ''} onClick={() => toggleSetor(s.value)}>
+            <span className="dot" style={{ background: setoresSel.includes(s.value) ? CORES_COMPARATIVO[i % CORES_COMPARATIVO.length] : 'var(--border-strong)' }} />
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {setoresSel.length === 0 ? (
+        <EmptyState icon={ShoppingCart} text="Selecione ao menos um setor para comparar." />
+      ) : (
+        <>
+          <div className="chart-box">
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="name" tick={{ fill: 'var(--text-dim)', fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: 'var(--text-dim)', fontSize: 10 }} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} width={38} />
+                <Tooltip formatter={(v, nome) => [fmtBRL(v), setorLabel(nome)]} contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: 'var(--text)' }} />
+                {setoresSel.map((s, i) => (
+                  <Bar key={s} dataKey={s} fill={CORES_COMPARATIVO[SETORES_VENDA.findIndex((x) => x.value === s) % CORES_COMPARATIVO.length]} radius={[3, 3, 0, 0]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <SectionTitle>Totais do período</SectionTitle>
+          <table className="rtable comparativo-table">
+            <thead><tr><th>Setor</th><th className="right">Total</th><th className="right">% do total</th></tr></thead>
+            <tbody>
+              {totaisPorSetor.map((t) => (
+                <tr key={t.setor}>
+                  <td>
+                    <span className="dot" style={{ background: CORES_COMPARATIVO[SETORES_VENDA.findIndex((x) => x.value === t.setor) % CORES_COMPARATIVO.length] }} />
+                    {setorLabel(t.setor)}
+                  </td>
+                  <td className="right mono">{fmtBRL(t.total)}</td>
+                  <td className="right dim">{totalGeral > 0 ? `${((t.total / totalGeral) * 100).toFixed(1)}%` : '—'}</td>
+                </tr>
+              ))}
+              <tr className="subtotal-row"><td>Total geral</td><td className="right mono">{fmtBRL(totalGeral)}</td><td className="right">100%</td></tr>
+            </tbody>
+          </table>
+
+          <div className="comparativo-export">
+            <ExportButton onClick={() => exportar('excel')} label="Excel" />
+            <ExportButton onClick={() => exportar('pdf')} label="PDF" />
+          </div>
+        </>
+      )}
+
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .sub-tabs { display:flex; gap:6px; margin-bottom:12px; }
+        .sub-tabs button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer; }
+        .sub-tabs button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .seg-filter { display:flex; gap:6px; margin-bottom:10px; }
+        .seg-filter button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .vendas-filtros { display:flex; gap:8px; margin-bottom:10px; }
+        .setores-check { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+        .setores-check button { display:inline-flex; align-items:center; gap:6px; background:var(--surface); border:1px solid var(--border); color:var(--text-dim); font-size:12px; font-weight:600; padding:7px 10px; border-radius:20px; cursor:pointer; }
+        .setores-check button.on { color:var(--text); border-color:var(--border-strong); }
+        .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px; vertical-align:middle; }
+        .comparativo-table { width:100%; margin:0 0 14px; }
+        .comparativo-export { display:flex; gap:8px; }
+      `}</style>
+      <RptStyle /><ViewStyle />
     </div>
   );
 }
@@ -1825,6 +2785,8 @@ function ReportSeguros({ data, onBack }) {
 function ReportVendas({ data, onBack }) {
   const [empresaFiltro, setEmpresaFiltro] = useState('todas');
   const [setorFiltro, setSetorFiltro] = useState('todos');
+  const [anoDe, setAnoDe] = useState(ANO_INICIAL_VENDAS);
+  const [anoAte, setAnoAte] = useState(new Date().getFullYear());
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
 
   // Agrega os lançamentos mensais em totais por empresa + setor + ano
@@ -1833,13 +2795,14 @@ function ReportVendas({ data, onBack }) {
     (data.vendas || [])
       .filter((v) => empresaFiltro === 'todas' || v.empresa_id === empresaFiltro)
       .filter((v) => setorFiltro === 'todos' || v.setor === setorFiltro)
+      .filter((v) => v.ano >= anoDe && v.ano <= anoAte)
       .forEach((v) => {
         const key = `${v.empresa_id}|${v.setor}|${v.ano}`;
         if (!map.has(key)) map.set(key, { empresa_id: v.empresa_id, setor: v.setor, ano: v.ano, total: 0 });
         map.get(key).total += Number(v.valor) || 0;
       });
     return Array.from(map.values()).sort((a, b) => b.ano - a.ano || a.setor.localeCompare(b.setor));
-  }, [data.vendas, empresaFiltro, setorFiltro]);
+  }, [data.vendas, empresaFiltro, setorFiltro, anoDe, anoAte]);
 
   const total = linhas.reduce((s, l) => s + l.total, 0);
   const columns = [
@@ -1861,13 +2824,25 @@ function ReportVendas({ data, onBack }) {
           <option value="todos">Todos os setores</option>
           {SETORES_VENDA.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
+        <div className="periodo-anos">
+          <label><span>De</span>
+            <select className="select" value={anoDe} onChange={(e) => setAnoDe(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().slice().reverse().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </label>
+          <label><span>Até</span>
+            <select className="select" value={anoAte} onChange={(e) => setAnoAte(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </label>
+        </div>
       </div>
       <ExportRow
         total={total} count={linhas.length}
-        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Vendas', fileName: 'vendas-por-setor', reportTitle: 'Vendas por Setor' }) : null}
-        exportPdf={linhas.length ? () => exportToPDF({ title: 'Vendas por Setor', groups, columns, valueColIndex: 2, fileName: 'vendas-por-setor' }) : null}
+        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Vendas', fileName: 'vendas-por-setor', reportTitle: `Vendas por Setor (${anoDe}–${anoAte})` }) : null}
+        exportPdf={linhas.length ? () => exportToPDF({ title: `Vendas por Setor (${anoDe}–${anoAte})`, groups, columns, valueColIndex: 2, fileName: 'vendas-por-setor' }) : null}
       />
-      {linhas.length === 0 ? <EmptyState icon={ShoppingCart} text="Nenhum lançamento de venda encontrado." /> : (
+      {linhas.length === 0 ? <EmptyState icon={ShoppingCart} text="Nenhum lançamento de venda encontrado nesse período." /> : (
         <div className="grouped-report">
           {groups.map((g) => {
             const subtotal = g.rows.reduce((s, l) => s + l.total, 0);
@@ -1895,6 +2870,12 @@ function ReportVendas({ data, onBack }) {
           </div>
         </div>
       )}
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .periodo-anos { display:flex; gap:8px; flex:1 1 100%; }
+        .periodo-anos label { display:flex; flex-direction:column; gap:4px; flex:1; }
+        .periodo-anos span { font-size:11px; color:var(--text-dim); }
+      `}</style>
       <RptStyle /><ViewStyle />
     </div>
   );
