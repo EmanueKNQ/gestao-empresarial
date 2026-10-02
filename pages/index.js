@@ -21,6 +21,8 @@ const ABAS_SISTEMA = [
   { key: 'contas', label: 'Contas a pagar' },
   { key: 'emprestimos', label: 'Empréstimos' },
   { key: 'taxas', label: 'Taxas' },
+  { key: 'saldoCartoes', label: 'Saldo Cartões' },
+  { key: 'bancoHoras', label: 'Banco de Horas' },
   { key: 'seguros', label: 'Seguros' },
   { key: 'vendas', label: 'Vendas' },
   { key: 'relatorios', label: 'Relatórios' },
@@ -255,8 +257,25 @@ function ExportButton({ onClick, disabled, label = 'Exportar Excel' }) {
   );
 }
 
-function exportToExcel(rows, columns, sheetName, fileName) {
-  const aoa = [columns.map((c) => c.header), ...rows.map((r) => columns.map((c) => c.get(r)))];
+// Formata o valor de uma célula para exibição: colunas marcadas como `money`
+// exibem no padrão brasileiro (R$ 1.234,56) tanto no Excel quanto no PDF.
+function formatCellForExport(col, value) {
+  return col.money ? fmtBRL(value) : value;
+}
+
+// Linhas de rodapé com as duas datas que importam num relatório: quando os
+// dados foram atualizados pela última vez (sincronismo com o banco) e quando
+// este relatório específico foi gerado/impresso — podem ser diferentes.
+function rodapeDatasExcel(dataAtualizacao) {
+  return [
+    [],
+    [`Última atualização dos dados: ${fmtDataHora(dataAtualizacao)}`],
+    [`Impresso em: ${fmtDataHora(new Date().toISOString())}`],
+  ];
+}
+
+function exportToExcel(rows, columns, sheetName, fileName, dataAtualizacao) {
+  const aoa = [columns.map((c) => c.header), ...rows.map((r) => columns.map((c) => formatCellForExport(c, c.get(r)))), ...rodapeDatasExcel(dataAtualizacao)];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = columns.map((c) => ({ wch: c.width || 18 }));
   const wb = XLSX.utils.book_new();
@@ -276,7 +295,7 @@ function groupRows(rows, groupKeyFn, groupLabelFn) {
   return Array.from(map.values());
 }
 
-function exportGroupedExcel({ groups, columns, valueColIndex, sheetName, fileName, reportTitle }) {
+function exportGroupedExcel({ groups, columns, valueColIndex, sheetName, fileName, reportTitle, dataAtualizacao }) {
   const aoa = [];
   aoa.push([reportTitle]);
   aoa.push([`Gerado em ${fmtDate(todayISO())}`]);
@@ -287,21 +306,23 @@ function exportGroupedExcel({ groups, columns, valueColIndex, sheetName, fileNam
     aoa.push(columns.map((c) => c.header));
     let subtotal = 0;
     g.rows.forEach((r) => {
-      const rowVals = columns.map((c) => c.get(r));
-      if (valueColIndex != null) subtotal += Number(rowVals[valueColIndex]) || 0;
+      const rawVals = columns.map((c) => c.get(r));
+      if (valueColIndex != null) subtotal += Number(rawVals[valueColIndex]) || 0;
+      const rowVals = columns.map((c, i) => formatCellForExport(c, rawVals[i]));
       aoa.push(rowVals);
     });
     if (valueColIndex != null) {
-      const subtotalRow = columns.map((_, i) => (i === valueColIndex ? subtotal : (i === 0 ? 'Subtotal' : '')));
+      const subtotalRow = columns.map((c, i) => (i === valueColIndex ? formatCellForExport(c, subtotal) : (i === 0 ? 'Subtotal' : '')));
       aoa.push(subtotalRow);
       grandTotal += subtotal;
     }
     aoa.push([]);
   });
   if (valueColIndex != null) {
-    const totalRow = columns.map((_, i) => (i === valueColIndex ? grandTotal : (i === 0 ? 'TOTAL GERAL' : '')));
+    const totalRow = columns.map((c, i) => (i === valueColIndex ? formatCellForExport(c, grandTotal) : (i === 0 ? 'TOTAL GERAL' : '')));
     aoa.push(totalRow);
   }
+  aoa.push(...rodapeDatasExcel(dataAtualizacao));
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = columns.map((c) => ({ wch: c.width || 18 }));
   const wb = XLSX.utils.book_new();
@@ -311,7 +332,7 @@ function exportGroupedExcel({ groups, columns, valueColIndex, sheetName, fileNam
 
 // Gera um PDF do relatório, agrupado por empresa (ou outro critério), com
 // cabeçalho de seção, subtotal por grupo e total geral — mesma estrutura das telas.
-function exportToPDF({ title, subtitle, groups, columns, valueColIndex, fileName }) {
+function exportToPDF({ title, subtitle, groups, columns, valueColIndex, fileName, dataAtualizacao }) {
   const doc = new jsPDF();
   doc.setFontSize(15);
   doc.setTextColor(...PDF_NAVY);
@@ -330,15 +351,15 @@ function exportToPDF({ title, subtitle, groups, columns, valueColIndex, fileName
     startY += 4;
 
     let subtotal = 0;
-    const body = g.rows.map((r) => columns.map((c) => {
+    const body = g.rows.map((r) => columns.map((c, i) => {
       const v = c.get(r);
-      if (valueColIndex != null && columns.indexOf(c) === valueColIndex) subtotal += Number(v) || 0;
-      return v;
+      if (valueColIndex != null && i === valueColIndex) subtotal += Number(v) || 0;
+      return formatCellForExport(c, v);
     }));
     if (valueColIndex != null) grandTotal += subtotal;
 
     const foot = valueColIndex != null
-      ? [columns.map((c, i) => (i === valueColIndex ? fmtBRL(subtotal) : (i === 0 ? 'Subtotal' : '')))]
+      ? [columns.map((c, i) => (i === valueColIndex ? formatCellForExport(c, subtotal) : (i === 0 ? 'Subtotal' : '')))]
       : undefined;
 
     autoTable(doc, {
@@ -359,7 +380,23 @@ function exportToPDF({ title, subtitle, groups, columns, valueColIndex, fileName
   if (valueColIndex != null) {
     doc.setFontSize(11);
     doc.setTextColor(...PDF_NAVY);
-    doc.text(`Total geral: ${fmtBRL(grandTotal)}`, 14, startY);
+    const totalFormatado = columns[valueColIndex]?.money ? fmtBRL(grandTotal) : grandTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    doc.text(`Total geral: ${totalFormatado}`, 14, startY);
+  }
+
+  // Rodapé em todas as páginas: data da última atualização dos dados (quando o
+  // app sincronizou com o banco) e data/hora em que este PDF foi impresso —
+  // as duas podem ser diferentes, por isso aparecem separadas.
+  const impressoEm = fmtDataHora(new Date().toISOString());
+  const atualizadoEm = fmtDataHora(dataAtualizacao);
+  const totalPaginas = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= totalPaginas; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7.5);
+    doc.setTextColor(140, 148, 155);
+    doc.text(`Última atualização dos dados: ${atualizadoEm}`, 14, 288);
+    doc.text(`Impresso em: ${impressoEm}`, 14, 292);
+    doc.text(`Página ${i} de ${totalPaginas}`, 196, 292, { align: 'right' });
   }
 
   doc.save(`${fileName}-${todayISO()}.pdf`);
@@ -501,6 +538,10 @@ function Home({ perfil }) {
     try {
       setErrorMsg(null);
       const next = await db.fetchAll();
+      // Marca o momento em que os dados foram sincronizados com o banco —
+      // usado no rodapé dos relatórios como "última atualização dos dados",
+      // separado da data/hora em que cada relatório é impresso.
+      next._lastSync = new Date().toISOString();
       setData(next);
     } catch (e) {
       console.error(e);
@@ -539,7 +580,7 @@ function Home({ perfil }) {
 
   const withSave = async (fn) => {
     setSaving(true);
-    try { await fn(); await reload(); } catch (e) { console.error(e); alert('Erro ao salvar. Tente novamente.'); }
+    try { await fn(); await reload(); } catch (e) { console.error(e); alert(`Erro ao salvar: ${e?.message || 'tente novamente.'}`); }
     setSaving(false);
   };
 
@@ -606,6 +647,21 @@ function Home({ perfil }) {
             onEditBoleto={(it) => setModal({ type: 'boleto', item: it })}
             onDeleteBoleto={(id, label) => setConfirmDelete({ type: 'boleto', id, label })} />
         )}
+        {tab === 'saldoCartoes' && (
+          <CartoesSaldoView data={data}
+            onEdit={(it) => setModal({ type: 'cartao-saldo', item: it })}
+            onDelete={(id, label) => setConfirmDelete({ type: 'cartao-saldo', id, label })}
+            onGoReport={() => { setTab('relatorios'); setReportView('saldo-cartoes'); }} />
+        )}
+        {tab === 'bancoHoras' && (
+          <BancoHorasView data={data}
+            onEdit={(it) => setModal({ type: 'funcionario-horas', item: it })}
+            onDelete={(id, label) => setConfirmDelete({ type: 'funcionario-horas', id, label })}
+            onNovoLancamento={(f) => setModal({ type: 'lancamento-horas', funcionario: f, item: null })}
+            onEditLancamento={(f, l) => setModal({ type: 'lancamento-horas', funcionario: f, item: l })}
+            onDeleteLancamento={(id, label) => setConfirmDelete({ type: 'lancamento-horas', id, label })}
+            onGoReport={() => { setTab('relatorios'); setReportView('banco-horas'); }} />
+        )}
         {tab === 'seguros' && (
           <SegurosView data={data}
             onEdit={(it) => setModal({ type: 'seguro', item: it })}
@@ -633,8 +689,11 @@ function Home({ perfil }) {
         )}
       </main>
 
-      {['empresas', 'bancos', 'contas', 'emprestimos', 'seguros', 'agenda'].includes(tab) && (
-        <button className="fab" onClick={() => setModal({ type: tab === 'empresas' ? 'empresa' : tab === 'bancos' ? 'banco' : tab === 'contas' ? 'conta' : tab === 'emprestimos' ? 'emprestimo' : tab === 'agenda' ? 'compromisso' : 'seguro', item: null })}>
+      {['empresas', 'bancos', 'contas', 'emprestimos', 'seguros', 'agenda', 'saldoCartoes', 'bancoHoras'].includes(tab) && (
+        <button className="fab" onClick={() => setModal({
+          type: tab === 'empresas' ? 'empresa' : tab === 'bancos' ? 'banco' : tab === 'contas' ? 'conta' : tab === 'emprestimos' ? 'emprestimo' : tab === 'agenda' ? 'compromisso' : tab === 'saldoCartoes' ? 'cartao-saldo' : tab === 'bancoHoras' ? 'funcionario-horas' : 'seguro',
+          item: null,
+        })}>
           <Plus size={24} />
         </button>
       )}
@@ -648,6 +707,8 @@ function Home({ perfil }) {
           { key: 'contas', label: 'A pagar', icon: CalendarClock },
           { key: 'emprestimos', label: 'Empréstimos', icon: HandCoins },
           { key: 'taxas', label: 'Taxas', icon: Percent },
+          { key: 'saldoCartoes', label: 'Saldo Cartões', icon: CreditCard },
+          { key: 'bancoHoras', label: 'Banco Horas', icon: Clock },
           { key: 'seguros', label: 'Seguros', icon: Shield },
           { key: 'vendas', label: 'Vendas', icon: ShoppingCart },
           { key: 'relatorios', label: 'Relatórios', icon: FileBarChart },
@@ -670,6 +731,9 @@ function Home({ perfil }) {
       {modal?.type === 'seguro' && <SeguroForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveSeguro(v); setModal(null); })} />}
       {modal?.type === 'compromisso' && <CompromissoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveCompromisso(v); setModal(null); })} />}
       {modal?.type === 'proximo-passo' && <ProximoPassoForm anterior={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.criarProximoPasso(modal.item, v); setModal(null); })} />}
+      {modal?.type === 'cartao-saldo' && <CartaoSaldoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveCartaoSaldo(v); setModal(null); })} />}
+      {modal?.type === 'funcionario-horas' && <FuncionarioHorasForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveFuncionarioHoras(v); setModal(null); })} />}
+      {modal?.type === 'lancamento-horas' && <LancamentoHorasForm funcionario={modal.funcionario} item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveLancamentoHoras(modal.funcionario.id, v); setModal(null); })} />}
 
       {confirmDelete && (
         <Modal title="Excluir registro" onClose={() => setConfirmDelete(null)}>
@@ -686,6 +750,9 @@ function Home({ perfil }) {
               if (type === 'boleto') await db.deleteTaxaBoleto(id);
               if (type === 'seguro') await db.deleteSeguro(id);
               if (type === 'compromisso') await db.deleteCompromisso(id);
+              if (type === 'cartao-saldo') await db.deleteCartaoSaldo(id);
+              if (type === 'funcionario-horas') await db.deleteFuncionarioHoras(id);
+              if (type === 'lancamento-horas') await db.deleteLancamentoHoras(id);
               setConfirmDelete(null);
             })}>Excluir</PrimaryButton>
           </div>
@@ -1384,6 +1451,285 @@ function SeguroForm({ item, empresas, onClose, onSave }) {
   );
 }
 
+// ---------- Saldo de cartões ----------
+function CartoesSaldoView({ data, onEdit, onDelete, onGoReport }) {
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const lista = [...(data.cartoesSaldo || [])];
+  const grupos = groupRows(lista, (c) => c.empresa_id, (c) => empresaNome(c.empresa_id))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  if (!lista.length) return <EmptyState icon={CreditCard} text="Nenhum cartão cadastrado. Toque em + para adicionar." />;
+
+  return (
+    <div className="view">
+      {grupos.map((g) => {
+        const totalLimite = g.rows.reduce((s, c) => s + (Number(c.limite_total) || 0), 0);
+        const totalUtilizado = g.rows.reduce((s, c) => s + (Number(c.saldo_utilizado) || 0), 0);
+        return (
+          <div key={g.label} className="empresa-block">
+            <div className="empresa-head"><Building2 size={14} /> {g.label}</div>
+            {g.rows.map((c) => {
+              const disponivel = (Number(c.limite_total) || 0) - (Number(c.saldo_utilizado) || 0);
+              return (
+                <div key={c.id} className="card">
+                  <div className="card-head">
+                    <div className="card-title"><CreditCard size={16} /> {c.nome_cartao} {c.bandeira ? <span className="badge">{c.bandeira}</span> : null}</div>
+                    <div className="card-actions">
+                      <button className="icon-btn" onClick={() => onEdit({
+                        id: c.id, empresaId: c.empresa_id, nomeCartao: c.nome_cartao, bandeira: c.bandeira,
+                        limiteTotal: c.limite_total, saldoUtilizado: c.saldo_utilizado, vencimentoDia: c.vencimento_dia, observacoes: c.observacoes,
+                      })}><Pencil size={16} /></button>
+                      <button className="icon-btn danger" onClick={() => onDelete(c.id, c.nome_cartao)}><Trash2 size={16} /></button>
+                    </div>
+                  </div>
+                  <div className="card-grid">
+                    <div><span className="k">Limite total</span><span className="v mono">{fmtBRL(c.limite_total)}</span></div>
+                    <div><span className="k">Utilizado</span><span className="v mono">{fmtBRL(c.saldo_utilizado)}</span></div>
+                    <div><span className="k">Disponível</span><span className="v mono" style={{ color: disponivel < 0 ? 'var(--danger)' : 'var(--success)' }}>{fmtBRL(disponivel)}</span></div>
+                    <div><span className="k">Vencimento</span><span className="v">{c.vencimento_dia ? `Dia ${c.vencimento_dia}` : '—'}</span></div>
+                  </div>
+                  {c.observacoes && <p className="descricao">{c.observacoes}</p>}
+                </div>
+              );
+            })}
+            <div className="subtotal-linha">
+              <span>Subtotal {g.label}</span>
+              <span className="mono">{fmtBRL(totalLimite - totalUtilizado)} disponível de {fmtBRL(totalLimite)}</span>
+            </div>
+          </div>
+        );
+      })}
+      <button className="reports-link" onClick={onGoReport}><FileBarChart size={16} /> Relatório de saldo de cartões <ChevronRight size={15} /></button>
+      <style jsx>{`
+        .empresa-block { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
+        .empresa-head { display:flex; align-items:center; gap:6px; font-family:'Space Grotesk',sans-serif; font-size:13.5px; color:var(--accent); font-weight:600; }
+        .subtotal-linha { display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); padding:4px 2px 0; }
+        .descricao { margin:10px 0 0; font-size:13px; color:var(--text-muted); line-height:1.5; }
+        .reports-link { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--surface); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13px; padding:13px; border-radius:10px; cursor:pointer; margin-top:4px; }
+      `}</style>
+      <ViewStyle />
+    </div>
+  );
+}
+
+function CartaoSaldoForm({ item, empresas, onClose, onSave }) {
+  const [empresaId, setEmpresaId] = useState(item?.empresaId || empresas[0]?.id || '');
+  const [nomeCartao, setNomeCartao] = useState(item?.nomeCartao || '');
+  const [bandeira, setBandeira] = useState(item?.bandeira || BANDEIRAS[0]);
+  const [limiteTotal, setLimiteTotal] = useState(item?.limiteTotal ?? '');
+  const [saldoUtilizado, setSaldoUtilizado] = useState(item?.saldoUtilizado ?? '');
+  const [vencimentoDia, setVencimentoDia] = useState(item?.vencimentoDia ?? '');
+  const [observacoes, setObservacoes] = useState(item?.observacoes || '');
+
+  const canSave = empresaId && nomeCartao.trim();
+
+  return (
+    <Modal title={item ? 'Editar cartão' : 'Novo cartão'} onClose={onClose}>
+      {empresas.length === 0 ? <p className="muted2">Cadastre uma empresa antes.</p> : (
+        <>
+          <Field label="Empresa"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
+          <Field label="Cartão"><input className="input" value={nomeCartao} onChange={(e) => setNomeCartao(e.target.value)} placeholder="Ex: Nubank Empresarial, Santander Business..." /></Field>
+          <Field label="Bandeira">
+            <select className="select" value={bandeira} onChange={(e) => setBandeira(e.target.value)}>
+              {BANDEIRAS.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </Field>
+          <Field label="Limite total (R$)"><DecimalMaskInput value={limiteTotal} onChange={setLimiteTotal} /></Field>
+          <Field label="Saldo utilizado / fatura atual (R$)"><DecimalMaskInput value={saldoUtilizado} onChange={setSaldoUtilizado} /></Field>
+          <Field label="Dia de vencimento (opcional)"><input className="input" type="number" min="1" max="31" value={vencimentoDia} onChange={(e) => setVencimentoDia(e.target.value)} placeholder="Ex: 10" /></Field>
+          <Field label="Observações (opcional)"><input className="input" value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Anotações sobre este cartão" /></Field>
+          <PrimaryButton full onClick={() => canSave && onSave({
+            id: item?.id, empresaId, nomeCartao: nomeCartao.trim(), bandeira,
+            limiteTotal: parseFloat(limiteTotal) || 0, saldoUtilizado: parseFloat(saldoUtilizado) || 0,
+            vencimentoDia: vencimentoDia ? parseInt(vencimentoDia, 10) : null, observacoes: observacoes.trim() || null,
+          })}>{item ? 'Salvar alterações' : 'Salvar cartão'}</PrimaryButton>
+        </>
+      )}
+      <style jsx>{inputCss}</style>
+    </Modal>
+  );
+}
+
+// ---------- Banco de horas ----------
+const DIAS_SEMANA = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+function diaSemanaLabel(iso) {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-').map(Number);
+  return DIAS_SEMANA[new Date(y, m - 1, d).getDay()];
+}
+function fmtHoras(v) {
+  const n = Number(v) || 0;
+  return `${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}h`;
+}
+function saldoFuncionario(f) {
+  return (f.lancamentos || []).reduce((s, l) => s + (Number(l.horas) || 0) * (Number(l.multiplicador) || 1), 0);
+}
+
+function BancoHorasView({ data, onEdit, onDelete, onNovoLancamento, onEditLancamento, onDeleteLancamento, onGoReport }) {
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const [expandedId, setExpandedId] = useState(null);
+  const lista = [...(data.funcionariosHoras || [])];
+  const grupos = groupRows(lista, (f) => f.empresa_id, (f) => empresaNome(f.empresa_id)).sort((a, b) => a.label.localeCompare(b.label));
+
+  if (!lista.length) return <EmptyState icon={Clock} text="Nenhum colaborador cadastrado. Toque em + para adicionar." />;
+
+  return (
+    <div className="view">
+      {grupos.map((g) => (
+        <div key={g.label} className="empresa-block">
+          <div className="empresa-head"><Building2 size={14} /> {g.label}</div>
+          {g.rows.map((f) => {
+            const saldo = saldoFuncionario(f);
+            const expanded = expandedId === f.id;
+            const lancamentosOrdenados = [...(f.lancamentos || [])].sort((a, b) => b.data.localeCompare(a.data));
+            return (
+              <div key={f.id} className="card">
+                <div className="card-head">
+                  <div className="card-title"><Users size={16} /> {f.nome} {!f.ativo && <span className="badge">Inativo</span>}</div>
+                  <div className="card-actions">
+                    <button className="icon-btn" onClick={() => onEdit({ id: f.id, empresaId: f.empresa_id, nome: f.nome, cargo: f.cargo, ativo: f.ativo })}><Pencil size={16} /></button>
+                    <button className="icon-btn danger" onClick={() => onDelete(f.id, f.nome)}><Trash2 size={16} /></button>
+                  </div>
+                </div>
+                <div className="card-grid">
+                  <div><span className="k">Cargo</span><span className="v">{f.cargo || '—'}</span></div>
+                  <div><span className="k">Saldo atual</span><span className="v mono" style={{ color: saldo < 0 ? 'var(--danger)' : saldo > 0 ? 'var(--success)' : undefined }}>{saldo >= 0 ? '+' : ''}{fmtHoras(saldo)}</span></div>
+                </div>
+                <div className="horas-acoes">
+                  <button className="acao-btn" onClick={() => onNovoLancamento(f)}><Plus size={14} /> Lançar horas</button>
+                  <button className="acao-btn" onClick={() => setExpandedId(expanded ? null : f.id)}>{expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />} {expanded ? 'Ocultar lançamentos' : `Ver lançamentos (${lancamentosOrdenados.length})`}</button>
+                </div>
+                {expanded && (
+                  <div className="lancamentos-lista">
+                    {lancamentosOrdenados.length === 0 ? <p className="muted2">Nenhum lançamento ainda.</p> : lancamentosOrdenados.map((l) => (
+                      <div key={l.id} className="lancamento-row">
+                        <div className="lancamento-info">
+                          <div className="lancamento-data">{fmtDate(l.data)} · {diaSemanaLabel(l.data)}{l.feriado ? ' · Feriado' : ''}</div>
+                          {l.descricao && <div className="lancamento-desc">{l.descricao}</div>}
+                        </div>
+                        <div className="lancamento-valor">
+                          <span className="mono" style={{ color: Number(l.horas) < 0 ? 'var(--danger)' : 'var(--success)' }}>
+                            {Number(l.horas) >= 0 ? '+' : ''}{fmtHoras(l.horas)}{Number(l.multiplicador) !== 1 ? ` ×${l.multiplicador}` : ''}
+                          </span>
+                          <button className="icon-btn" onClick={() => onEditLancamento(f, l)}><Pencil size={14} /></button>
+                          <button className="icon-btn danger" onClick={() => onDeleteLancamento(l.id, f.nome)}><Trash2 size={14} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      <button className="reports-link" onClick={onGoReport}><FileBarChart size={16} /> Relatório de banco de horas <ChevronRight size={15} /></button>
+      <style jsx>{`
+        .empresa-block { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
+        .empresa-head { display:flex; align-items:center; gap:6px; font-family:'Space Grotesk',sans-serif; font-size:13.5px; color:var(--accent); font-weight:600; }
+        .horas-acoes { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+        .acao-btn { display:inline-flex; align-items:center; gap:5px; background:var(--surface-alt); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:7px 11px; border-radius:8px; cursor:pointer; }
+        .lancamentos-lista { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:flex; flex-direction:column; gap:8px; }
+        .lancamento-row { display:flex; justify-content:space-between; align-items:center; gap:10px; background:var(--surface-alt); border-radius:8px; padding:8px 10px; }
+        .lancamento-info { min-width: 0; }
+        .lancamento-data { font-size:12.5px; color:var(--text); font-weight:600; }
+        .lancamento-desc { font-size:11.5px; color:var(--text-dim); margin-top:2px; }
+        .lancamento-valor { display:flex; align-items:center; gap:4px; font-size:13px; font-weight:600; flex-shrink:0; }
+        .reports-link { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--surface); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13px; padding:13px; border-radius:10px; cursor:pointer; margin-top:4px; }
+      `}</style>
+      <ViewStyle />
+    </div>
+  );
+}
+
+function FuncionarioHorasForm({ item, empresas, onClose, onSave }) {
+  const [empresaId, setEmpresaId] = useState(item?.empresaId || empresas[0]?.id || '');
+  const [nome, setNome] = useState(item?.nome || '');
+  const [cargo, setCargo] = useState(item?.cargo || '');
+  const [ativo, setAtivo] = useState(item?.ativo !== false);
+  const canSave = empresaId && nome.trim();
+  return (
+    <Modal title={item ? 'Editar colaborador' : 'Novo colaborador'} onClose={onClose}>
+      {empresas.length === 0 ? <p className="muted2">Cadastre uma empresa antes.</p> : (
+        <>
+          <Field label="Empresa"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
+          <Field label="Nome do colaborador"><input className="input" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome completo" autoFocus /></Field>
+          <Field label="Cargo (opcional)"><input className="input" value={cargo} onChange={(e) => setCargo(e.target.value)} placeholder="Ex: Analista financeiro" /></Field>
+          {item && (
+            <Field label="Status">
+              <div className="tipo-toggle">
+                <button type="button" className={ativo ? 'active' : ''} onClick={() => setAtivo(true)}>Ativo</button>
+                <button type="button" className={!ativo ? 'active' : ''} onClick={() => setAtivo(false)}>Inativo</button>
+              </div>
+            </Field>
+          )}
+          <PrimaryButton full onClick={() => canSave && onSave({ id: item?.id, empresaId, nome: nome.trim(), cargo: cargo.trim() || null, ativo })}>{item ? 'Salvar alterações' : 'Salvar colaborador'}</PrimaryButton>
+        </>
+      )}
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </Modal>
+  );
+}
+
+function LancamentoHorasForm({ funcionario, item, onClose, onSave }) {
+  const [dataLanc, setDataLanc] = useState(item?.data || todayISO());
+  const [tipo, setTipo] = useState(item ? (Number(item.horas) < 0 ? 'negativo' : 'positivo') : 'positivo');
+  const [horasAbs, setHorasAbs] = useState(item ? String(Math.abs(Number(item.horas))).replace('.', ',') : '');
+  const [feriado, setFeriado] = useState(item?.feriado || false);
+  const [multiplicador, setMultiplicador] = useState(item?.multiplicador ?? 1);
+  const [descricao, setDescricao] = useState(item?.descricao || '');
+
+  const canSave = dataLanc && horasAbs;
+
+  const handleSave = () => {
+    const valor = parseFloat(String(horasAbs).replace(',', '.')) || 0;
+    onSave({
+      id: item?.id,
+      funcionarioId: funcionario.id,
+      data: dataLanc,
+      feriado,
+      horas: tipo === 'negativo' ? -Math.abs(valor) : Math.abs(valor),
+      multiplicador: parseFloat(String(multiplicador).replace(',', '.')) || 1,
+      descricao: descricao.trim() || null,
+    });
+  };
+
+  return (
+    <Modal title={`Lançar horas · ${funcionario.nome}`} onClose={onClose}>
+      <Field label="Data"><input className="input" type="date" value={dataLanc} onChange={(e) => setDataLanc(e.target.value)} /></Field>
+      <div className="dia-semana-tag"><CalendarDays size={13} /> {diaSemanaLabel(dataLanc)}</div>
+      <Field label="Tipo de lançamento">
+        <div className="tipo-toggle">
+          <button type="button" className={tipo === 'positivo' ? 'active' : ''} onClick={() => setTipo('positivo')}>Horas positivas</button>
+          <button type="button" className={tipo === 'negativo' ? 'active' : ''} onClick={() => setTipo('negativo')}>Horas negativas</button>
+        </div>
+      </Field>
+      <Field label="Quantidade de horas"><input className="input" value={horasAbs} onChange={(e) => setHorasAbs(e.target.value)} placeholder="Ex: 2,5" /></Field>
+      <Field label="Dia especial">
+        <div className="tipo-toggle">
+          <button type="button" className={!feriado ? 'active' : ''} onClick={() => setFeriado(false)}>Dia normal</button>
+          <button type="button" className={feriado ? 'active' : ''} onClick={() => setFeriado(true)}>Feriado</button>
+        </div>
+      </Field>
+      <Field label="Multiplicador (opcional — ex: 2 para feriado em dobro)"><input className="input" type="number" step="0.5" min="0" value={multiplicador} onChange={(e) => setMultiplicador(e.target.value)} /></Field>
+      <Field label="Descrição / motivo (opcional)"><input className="input" value={descricao} onChange={(e) => setDescricao(e.target.value)} placeholder="Ex: Hora extra, folga compensada..." /></Field>
+      <PrimaryButton full onClick={() => canSave && handleSave()}>{item ? 'Salvar alterações' : 'Salvar lançamento'}</PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .dia-semana-tag { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--accent); font-weight:600; margin:-6px 0 10px; }
+      `}</style>
+    </Modal>
+  );
+}
+
 // ---------- Agenda (compromissos e obrigações) ----------
 
 function tipoLabel(v) { return TIPOS_COMPROMISSO.find((t) => t.value === v)?.label || v; }
@@ -1954,16 +2300,16 @@ function VendasComparativo({ data, onVoltar }) {
   const exportar = (tipo) => {
     const colunas = [
       { header: modo === 'mes' ? 'Mês' : 'Ano', get: (l) => l.name, width: 14 },
-      ...setoresSel.map((s) => ({ header: setorLabel(s), get: (l) => Number(l[s]) || 0, width: 16 })),
+      ...setoresSel.map((s) => ({ header: setorLabel(s), get: (l) => Number(l[s]) || 0, width: 16, money: true })),
     ];
     const titulo = modo === 'mes'
       ? `Comparativo de Vendas por Setor · ${ano}`
       : `Comparativo de Vendas por Setor · ${anoDe}–${anoAte}`;
     const grupos = [{ label: empresaId === 'todas' ? 'Todas as empresas' : (data.empresas.find((e) => e.id === empresaId)?.nome || ''), rows: chartData }];
     if (tipo === 'excel') {
-      exportGroupedExcel({ groups: grupos, columns: colunas, valueColIndex: null, sheetName: 'Comparativo', fileName: 'comparativo-vendas', reportTitle: titulo });
+      exportGroupedExcel({ groups: grupos, columns: colunas, valueColIndex: null, sheetName: 'Comparativo', fileName: 'comparativo-vendas', reportTitle: titulo, dataAtualizacao: data._lastSync });
     } else {
-      exportToPDF({ title: titulo, groups: grupos, columns: colunas, valueColIndex: null, fileName: 'comparativo-vendas' });
+      exportToPDF({ title: titulo, groups: grupos, columns: colunas, valueColIndex: null, fileName: 'comparativo-vendas', dataAtualizacao: data._lastSync });
     }
   };
 
@@ -2146,11 +2492,11 @@ function CartoesView({ data, onEdit, onNew, onDelete, onBack }) {
   const doExport = () => exportToExcel(lista, [
     { header: 'Administradora', get: (t) => t.administradora, width: 22 },
     { header: 'Bandeira', get: (t) => t.bandeira, width: 16 },
-    { header: 'Pix', get: (t) => Number(t.taxa_pix) || 0, width: 10 },
-    { header: 'Débito', get: (t) => Number(t.taxa_debito) || 0, width: 10 },
-    { header: 'Crédito à vista', get: (t) => Number(t.taxa_credito_avista) || 0, width: 14 },
-    ...PARCELAS_RANGE.map((n) => ({ header: `${n}x`, get: (t) => Number(t.parcelas?.[n]) || 0, width: 8 })),
-  ], 'Taxas de Cartão', 'taxas-cartao');
+    { header: 'Pix', get: (t) => fmtPct(t.taxa_pix), width: 10 },
+    { header: 'Débito', get: (t) => fmtPct(t.taxa_debito), width: 10 },
+    { header: 'Crédito à vista', get: (t) => fmtPct(t.taxa_credito_avista), width: 14 },
+    ...PARCELAS_RANGE.map((n) => ({ header: `${n}x`, get: (t) => fmtPct(t.parcelas?.[n]), width: 8 })),
+  ], 'Taxas de Cartão', 'taxas-cartao', data._lastSync);
 
   return (
     <div className="report-body">
@@ -2241,11 +2587,11 @@ function BoletosView({ data, onEdit, onNew, onDelete, onBack }) {
 
   const doExport = () => exportToExcel(data.taxasBoleto, [
     { header: 'Administradora', get: (t) => t.administradora, width: 24 },
-    { header: 'Emissão (R$)', get: (t) => Number(t.taxa_emissao) || 0, width: 14 },
-    { header: 'Baixa (R$)', get: (t) => Number(t.taxa_baixa) || 0, width: 14 },
-    { header: 'Protesto (R$)', get: (t) => Number(t.taxa_protesto) || 0, width: 14 },
-    { header: 'Antecipação (% a.m.)', get: (t) => Number(t.taxa_antecipacao) || 0, width: 18 },
-  ], 'Taxas de Boleto', 'taxas-boleto');
+    { header: 'Emissão (R$)', get: (t) => Number(t.taxa_emissao) || 0, width: 14, money: true },
+    { header: 'Baixa (R$)', get: (t) => Number(t.taxa_baixa) || 0, width: 14, money: true },
+    { header: 'Protesto (R$)', get: (t) => Number(t.taxa_protesto) || 0, width: 14, money: true },
+    { header: 'Antecipação (% a.m.)', get: (t) => fmtPct(t.taxa_antecipacao), width: 18 },
+  ], 'Taxas de Boleto', 'taxas-boleto', data._lastSync);
 
   return (
     <div className="report-body">
@@ -2316,6 +2662,8 @@ function ReportsHome({ view, setView, data }) {
   if (view === 'parcelas-emprestimo') return <ReportParcelasEmprestimo data={data} onBack={() => setView(null)} />;
   if (view === 'seguros') return <ReportSeguros data={data} onBack={() => setView(null)} />;
   if (view === 'vendas') return <ReportVendas data={data} onBack={() => setView(null)} />;
+  if (view === 'saldo-cartoes') return <ReportSaldoCartoes data={data} onBack={() => setView(null)} />;
+  if (view === 'banco-horas') return <ReportBancoHoras data={data} onBack={() => setView(null)} />;
   const options = [
     { key: 'bancos', label: 'Saldos por banco', desc: 'Total consolidado em cada conta bancária', icon: Landmark },
     { key: 'empresas', label: 'Saldos por empresa', desc: 'Total consolidado por empresa do grupo', icon: Building2 },
@@ -2325,6 +2673,8 @@ function ReportsHome({ view, setView, data }) {
     { key: 'parcelas-emprestimo', label: 'Parcelas de empréstimos', desc: 'Pendentes e pagas, filtráveis por tipo e empresa', icon: CalendarClock },
     { key: 'seguros', label: 'Seguros', desc: 'Vigências, vencimentos e valores por empresa', icon: Shield },
     { key: 'vendas', label: 'Vendas por setor', desc: 'Totais mensais e anuais desde 2018, por setor e empresa', icon: ShoppingCart },
+    { key: 'saldo-cartoes', label: 'Saldo de cartões', desc: 'Limite, utilizado e disponível por empresa', icon: CreditCard },
+    { key: 'banco-horas', label: 'Banco de horas', desc: 'Saldo de horas por colaborador, agrupado por empresa', icon: Clock },
   ];
   return (
     <div className="reports-home">
@@ -2365,7 +2715,7 @@ function ReportSaldosBancos({ data, onBack }) {
   const sorted = [...data.bancos].sort((a, b) => (Number(b.saldo) || 0) - (Number(a.saldo) || 0));
   const columns = [
     { header: 'Banco', get: (b) => b.nome_banco, width: 24 },
-    { header: 'Saldo', get: (b) => Number(b.saldo) || 0, width: 16 },
+    { header: 'Saldo', get: (b) => Number(b.saldo) || 0, width: 16, money: true },
   ];
   const groups = groupRows(sorted, (b) => b.empresa_id, (b) => empresaNome(b.empresa_id))
     .sort((a, b) => a.label.localeCompare(b.label));
@@ -2375,8 +2725,8 @@ function ReportSaldosBancos({ data, onBack }) {
       <ReportHeader title="Saldos por banco" onBack={onBack} />
       <ExportRow
         total={total}
-        exportExcel={sorted.length ? () => exportGroupedExcel({ groups: groups.map((g) => ({ ...g, label: `Empresa: ${g.label}` })), columns, valueColIndex: 1, sheetName: 'Saldos por Banco', fileName: 'saldos-por-banco', reportTitle: 'Saldos por Banco' }) : null}
-        exportPdf={sorted.length ? () => exportToPDF({ title: 'Saldos por Banco', groups: groups.map((g) => ({ ...g, label: `Empresa: ${g.label}` })), columns, valueColIndex: 1, fileName: 'saldos-por-banco' }) : null}
+        exportExcel={sorted.length ? () => exportGroupedExcel({ groups: groups.map((g) => ({ ...g, label: `Empresa: ${g.label}` })), columns, valueColIndex: 1, sheetName: 'Saldos por Banco', fileName: 'saldos-por-banco', reportTitle: 'Saldos por Banco', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={sorted.length ? () => exportToPDF({ title: 'Saldos por Banco', groups: groups.map((g) => ({ ...g, label: `Empresa: ${g.label}` })), columns, valueColIndex: 1, fileName: 'saldos-por-banco', dataAtualizacao: data._lastSync }) : null}
       />
       {sorted.length === 0 ? <EmptyState icon={Landmark} text="Nenhum banco cadastrado." /> : (
         <div className="grouped-report">
@@ -2407,7 +2757,7 @@ function ReportSaldosEmpresas({ data, onBack }) {
   const columns = [
     { header: 'Empresa', get: (r) => r.nome, width: 24 },
     { header: 'Bancos', get: (r) => r.numBancos, width: 12 },
-    { header: 'Saldo', get: (r) => r.saldo, width: 16 },
+    { header: 'Saldo', get: (r) => r.saldo, width: 16, money: true },
   ];
   const groups = [{ label: 'Todas as empresas', rows }];
 
@@ -2416,8 +2766,8 @@ function ReportSaldosEmpresas({ data, onBack }) {
       <ReportHeader title="Saldos por empresa" onBack={onBack} />
       <ExportRow
         total={total}
-        exportExcel={rows.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Saldos por Empresa', fileName: 'saldos-por-empresa', reportTitle: 'Saldos por Empresa' }) : null}
-        exportPdf={rows.length ? () => exportToPDF({ title: 'Saldos por Empresa', groups, columns, valueColIndex: 2, fileName: 'saldos-por-empresa' }) : null}
+        exportExcel={rows.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Saldos por Empresa', fileName: 'saldos-por-empresa', reportTitle: 'Saldos por Empresa', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={rows.length ? () => exportToPDF({ title: 'Saldos por Empresa', groups, columns, valueColIndex: 2, fileName: 'saldos-por-empresa', dataAtualizacao: data._lastSync }) : null}
       />
       {rows.length === 0 ? <EmptyState icon={Building2} text="Nenhuma empresa cadastrada." /> : (
         <table className="rtable"><thead><tr><th>Empresa</th><th>Bancos</th><th className="right">Saldo</th></tr></thead>
@@ -2460,7 +2810,7 @@ function ReportContasPagar({ data, onBack }) {
     { header: 'Descrição', get: (c) => c.descricao, width: 28 },
     { header: 'Vencimento', get: (c) => fmtDate(c.data_vencimento), width: 14 },
     { header: 'Status', get: (c) => c.status === 'pago' ? 'Pago' : (daysUntil(c.data_vencimento) < 0 ? 'Atrasada' : 'Pendente'), width: 12 },
-    { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16 },
+    { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16, money: true },
   ];
   const groups = groupRows(filtradas, (c) => c.empresa_id, (c) => `Empresa: ${empresaNome(c.empresa_id)}`);
 
@@ -2479,8 +2829,8 @@ function ReportContasPagar({ data, onBack }) {
       </div>
       <ExportRow
         total={total} count={filtradas.length}
-        exportExcel={filtradas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 3, sheetName: 'Contas a Pagar', fileName: 'contas-a-pagar', reportTitle: 'Contas a Pagar' }) : null}
-        exportPdf={filtradas.length ? () => exportToPDF({ title: 'Contas a Pagar', groups, columns, valueColIndex: 3, fileName: 'contas-a-pagar' }) : null}
+        exportExcel={filtradas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 3, sheetName: 'Contas a Pagar', fileName: 'contas-a-pagar', reportTitle: 'Contas a Pagar', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={filtradas.length ? () => exportToPDF({ title: 'Contas a Pagar', groups, columns, valueColIndex: 3, fileName: 'contas-a-pagar', dataAtualizacao: data._lastSync }) : null}
       />
       {filtradas.length === 0 ? <EmptyState icon={CalendarClock} text="Nenhuma conta encontrada." /> : (
         <table className="rtable"><thead><tr><th>Descrição</th><th>Empresa</th><th>Vencimento</th><th className="right">Valor</th></tr></thead>
@@ -2509,7 +2859,7 @@ function ReportPagamentos({ data, onBack }) {
   const columns = [
     { header: 'Descrição', get: (c) => c.descricao, width: 28 },
     { header: 'Baixa em', get: (c) => fmtDate(c.data_pagamento), width: 14 },
-    { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16 },
+    { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16, money: true },
   ];
   const groups = groupRows(pagas, (c) => c.empresa_id, (c) => `Empresa: ${empresaNome(c.empresa_id)}`);
 
@@ -2525,8 +2875,8 @@ function ReportPagamentos({ data, onBack }) {
       </div>
       <ExportRow
         total={total} count={pagas.length}
-        exportExcel={pagas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Contas Pagas', fileName: 'contas-pagas', reportTitle: 'Contas Pagas (Baixas)' }) : null}
-        exportPdf={pagas.length ? () => exportToPDF({ title: 'Contas Pagas (Baixas)', groups, columns, valueColIndex: 2, fileName: 'contas-pagas' }) : null}
+        exportExcel={pagas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Contas Pagas', fileName: 'contas-pagas', reportTitle: 'Contas Pagas (Baixas)', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={pagas.length ? () => exportToPDF({ title: 'Contas Pagas (Baixas)', groups, columns, valueColIndex: 2, fileName: 'contas-pagas', dataAtualizacao: data._lastSync }) : null}
       />
       {pagas.length === 0 ? <EmptyState icon={CheckCircle2} text="Nenhuma baixa registrada ainda." /> : (
         <table className="rtable"><thead><tr><th>Descrição</th><th>Empresa</th><th>Baixa em</th><th className="right">Valor</th></tr></thead>
@@ -2555,11 +2905,11 @@ function ReportEmprestimosPorEmpresa({ data, onBack }) {
     { header: 'Tipo', get: (e) => (e.tipo || 'banco') === 'banco' ? 'Bancário' : 'Intercompany', width: 14 },
     { header: 'Credor / Empresa credora', get: (e) => (e.tipo || 'banco') === 'banco' ? e.credor : empresaNome(e.empresa_credora_id), width: 24 },
     { header: 'Linha de crédito', get: (e) => e.linha_credito || '—', width: 20 },
-    { header: 'Valor da parcela', get: (e) => Number(e.valor_parcela) || 0, width: 16 },
+    { header: 'Valor da parcela', get: (e) => Number(e.valor_parcela) || 0, width: 16, money: true },
     { header: 'Parcelas pagas', get: (e) => `${(e.parcelas || []).filter((p) => p.status === 'pago').length}/${(e.parcelas || []).length}`, width: 14 },
     { header: 'Carência', get: (e) => e.tem_carencia ? `${e.prazo_carencia} ${e.prazo_carencia === 1 ? 'mês' : 'meses'}` : 'Sem carência', width: 16 },
     { header: 'Data final do contrato', get: (e) => fmtDate(dataFinalContrato(e)), width: 18 },
-    { header: 'Valor total', get: (e) => Number(e.valor_total) || 0, width: 16 },
+    { header: 'Valor total', get: (e) => Number(e.valor_total) || 0, width: 16, money: true },
   ];
   const groups = groupRows(lista, (e) => e.empresa_id, (e) => `Empresa devedora: ${empresaNome(e.empresa_id)}`);
 
@@ -2575,8 +2925,8 @@ function ReportEmprestimosPorEmpresa({ data, onBack }) {
       </div>
       <ExportRow
         total={total} count={lista.length}
-        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 7, sheetName: 'Empréstimos', fileName: 'emprestimos-por-empresa', reportTitle: 'Empréstimos por Empresa' }) : null}
-        exportPdf={lista.length ? () => exportToPDF({ title: 'Empréstimos por Empresa', groups, columns, valueColIndex: 7, fileName: 'emprestimos-por-empresa' }) : null}
+        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 7, sheetName: 'Empréstimos', fileName: 'emprestimos-por-empresa', reportTitle: 'Empréstimos por Empresa', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={lista.length ? () => exportToPDF({ title: 'Empréstimos por Empresa', groups, columns, valueColIndex: 7, fileName: 'emprestimos-por-empresa', dataAtualizacao: data._lastSync }) : null}
       />
       {lista.length === 0 ? <EmptyState icon={HandCoins} text="Nenhum empréstimo encontrado." /> : (
         <div className="grouped-report">
@@ -2640,7 +2990,7 @@ function ReportParcelasEmprestimo({ data, onBack }) {
     { header: 'Parcela', get: (p) => `${p.numero}ª`, width: 10 },
     { header: 'Vencimento', get: (p) => fmtDate(p.data_vencimento), width: 14 },
     { header: 'Status', get: (p) => p.status === 'pago' ? 'Pago' : (daysUntil(p.data_vencimento) < 0 ? 'Atrasada' : 'Pendente'), width: 12 },
-    { header: 'Valor', get: (p) => Number(p.valor) || 0, width: 16 },
+    { header: 'Valor', get: (p) => Number(p.valor) || 0, width: 16, money: true },
   ];
   const groups = groupRows(linhas, (p) => p.emprestimo.empresa_id, (p) => `Empresa devedora: ${empresaNome(p.emprestimo.empresa_id)}`);
 
@@ -2663,8 +3013,8 @@ function ReportParcelasEmprestimo({ data, onBack }) {
       </div>
       <ExportRow
         total={total} count={linhas.length}
-        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 4, sheetName: 'Parcelas', fileName: 'parcelas-emprestimos', reportTitle: 'Parcelas de Empréstimos' }) : null}
-        exportPdf={linhas.length ? () => exportToPDF({ title: 'Parcelas de Empréstimos', groups, columns, valueColIndex: 4, fileName: 'parcelas-emprestimos' }) : null}
+        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 4, sheetName: 'Parcelas', fileName: 'parcelas-emprestimos', reportTitle: 'Parcelas de Empréstimos', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={linhas.length ? () => exportToPDF({ title: 'Parcelas de Empréstimos', groups, columns, valueColIndex: 4, fileName: 'parcelas-emprestimos', dataAtualizacao: data._lastSync }) : null}
       />
       {linhas.length === 0 ? <EmptyState icon={CalendarClock} text="Nenhuma parcela encontrada." /> : (
         <div className="grouped-report">
@@ -2722,7 +3072,7 @@ function ReportSeguros({ data, onBack }) {
     { header: 'Vigência fim', get: (s) => fmtDate(s.vigencia_fim), width: 14 },
     { header: 'Condutor', get: (s) => s.principal_condutor || '—', width: 18 },
     { header: 'Pagamento', get: (s) => formaLabel(s.forma_pagamento), width: 14 },
-    { header: 'Valor total', get: (s) => Number(s.valor_total) || 0, width: 16 },
+    { header: 'Valor total', get: (s) => Number(s.valor_total) || 0, width: 16, money: true },
   ];
   const groups = groupRows(lista, (s) => s.empresa_id, (s) => `Empresa: ${empresaNome(s.empresa_id)}`);
 
@@ -2743,8 +3093,8 @@ function ReportSeguros({ data, onBack }) {
       </div>
       <ExportRow
         total={total} count={lista.length}
-        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 6, sheetName: 'Seguros', fileName: 'seguros', reportTitle: 'Seguros' }) : null}
-        exportPdf={lista.length ? () => exportToPDF({ title: 'Seguros', groups, columns, valueColIndex: 6, fileName: 'seguros' }) : null}
+        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 6, sheetName: 'Seguros', fileName: 'seguros', reportTitle: 'Seguros', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={lista.length ? () => exportToPDF({ title: 'Seguros', groups, columns, valueColIndex: 6, fileName: 'seguros', dataAtualizacao: data._lastSync }) : null}
       />
       {lista.length === 0 ? <EmptyState icon={Shield} text="Nenhum seguro encontrado." /> : (
         <div className="grouped-report">
@@ -2808,7 +3158,7 @@ function ReportVendas({ data, onBack }) {
   const columns = [
     { header: 'Setor', get: (l) => setorLabel(l.setor), width: 22 },
     { header: 'Ano', get: (l) => l.ano, width: 10 },
-    { header: 'Total do ano', get: (l) => l.total, width: 16 },
+    { header: 'Total do ano', get: (l) => l.total, width: 16, money: true },
   ];
   const groups = groupRows(linhas, (l) => l.empresa_id, (l) => `Empresa: ${empresaNome(l.empresa_id)}`);
 
@@ -2839,8 +3189,8 @@ function ReportVendas({ data, onBack }) {
       </div>
       <ExportRow
         total={total} count={linhas.length}
-        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Vendas', fileName: 'vendas-por-setor', reportTitle: `Vendas por Setor (${anoDe}–${anoAte})` }) : null}
-        exportPdf={linhas.length ? () => exportToPDF({ title: `Vendas por Setor (${anoDe}–${anoAte})`, groups, columns, valueColIndex: 2, fileName: 'vendas-por-setor' }) : null}
+        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Vendas', fileName: 'vendas-por-setor', reportTitle: `Vendas por Setor (${anoDe}–${anoAte})`, dataAtualizacao: data._lastSync }) : null}
+        exportPdf={linhas.length ? () => exportToPDF({ title: `Vendas por Setor (${anoDe}–${anoAte})`, groups, columns, valueColIndex: 2, fileName: 'vendas-por-setor', dataAtualizacao: data._lastSync }) : null}
       />
       {linhas.length === 0 ? <EmptyState icon={ShoppingCart} text="Nenhum lançamento de venda encontrado nesse período." /> : (
         <div className="grouped-report">
@@ -2876,6 +3226,128 @@ function ReportVendas({ data, onBack }) {
         .periodo-anos label { display:flex; flex-direction:column; gap:4px; flex:1; }
         .periodo-anos span { font-size:11px; color:var(--text-dim); }
       `}</style>
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
+function ReportSaldoCartoes({ data, onBack }) {
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const lista = [...(data.cartoesSaldo || [])];
+  const total = lista.reduce((s, c) => s + ((Number(c.limite_total) || 0) - (Number(c.saldo_utilizado) || 0)), 0);
+  const columns = [
+    { header: 'Cartão', get: (c) => c.nome_cartao, width: 22 },
+    { header: 'Bandeira', get: (c) => c.bandeira || '—', width: 16 },
+    { header: 'Limite total', get: (c) => Number(c.limite_total) || 0, width: 16, money: true },
+    { header: 'Utilizado', get: (c) => Number(c.saldo_utilizado) || 0, width: 16, money: true },
+    { header: 'Disponível', get: (c) => (Number(c.limite_total) || 0) - (Number(c.saldo_utilizado) || 0), width: 16, money: true },
+    { header: 'Vencimento', get: (c) => c.vencimento_dia ? `Dia ${c.vencimento_dia}` : '—', width: 14 },
+  ];
+  const groups = groupRows(lista, (c) => c.empresa_id, (c) => `Empresa: ${empresaNome(c.empresa_id)}`);
+
+  return (
+    <div className="report-body">
+      <ReportHeader title="Saldo de cartões" onBack={onBack} />
+      <ExportRow
+        total={total} count={lista.length}
+        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 4, sheetName: 'Saldo de Cartões', fileName: 'saldo-cartoes', reportTitle: 'Saldo de Cartões', dataAtualizacao: data._lastSync }) : null}
+        exportPdf={lista.length ? () => exportToPDF({ title: 'Saldo de Cartões', groups, columns, valueColIndex: 4, fileName: 'saldo-cartoes', dataAtualizacao: data._lastSync }) : null}
+      />
+      {lista.length === 0 ? <EmptyState icon={CreditCard} text="Nenhum cartão cadastrado." /> : (
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, c) => s + ((Number(c.limite_total) || 0) - (Number(c.saldo_utilizado) || 0)), 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Cartão</th><th>Bandeira</th><th className="right">Limite</th><th className="right">Utilizado</th><th className="right">Disponível</th><th>Vencimento</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((c) => {
+                      const disponivel = (Number(c.limite_total) || 0) - (Number(c.saldo_utilizado) || 0);
+                      return (
+                        <tr key={c.id}>
+                          <td>{c.nome_cartao}</td>
+                          <td className="dim">{c.bandeira || '—'}</td>
+                          <td className="right mono">{fmtBRL(c.limite_total)}</td>
+                          <td className="right mono">{fmtBRL(c.saldo_utilizado)}</td>
+                          <td className="right mono" style={{ color: disponivel < 0 ? 'var(--danger)' : undefined }}>{fmtBRL(disponivel)}</td>
+                          <td className="dim">{c.vencimento_dia ? `Dia ${c.vencimento_dia}` : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="subtotal-row"><td colSpan={4}>Subtotal {g.label.replace('Empresa: ', '')}</td><td className="right mono">{fmtBRL(subtotal)}</td><td></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          <div className="grand-total-row">
+            <span>Total geral disponível</span>
+            <span className="mono">{fmtBRL(total)}</span>
+          </div>
+        </div>
+      )}
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
+function ReportBancoHoras({ data, onBack }) {
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const lista = [...(data.funcionariosHoras || [])];
+  const total = lista.reduce((s, f) => s + saldoFuncionario(f), 0);
+  const columns = [
+    { header: 'Colaborador', get: (f) => f.nome, width: 24 },
+    { header: 'Cargo', get: (f) => f.cargo || '—', width: 18 },
+    { header: 'Status', get: (f) => f.ativo ? 'Ativo' : 'Inativo', width: 12 },
+    { header: 'Lançamentos', get: (f) => (f.lancamentos || []).length, width: 12 },
+    { header: 'Saldo (horas)', get: (f) => Number(saldoFuncionario(f).toFixed(2)), width: 14 },
+  ];
+  const groups = groupRows(lista, (f) => f.empresa_id, (f) => `Empresa: ${empresaNome(f.empresa_id)}`);
+
+  return (
+    <div className="report-body">
+      <ReportHeader title="Banco de horas" onBack={onBack} />
+      <div className="rtotal">
+        Saldo total: <span className="mono">{total >= 0 ? '+' : ''}{fmtHoras(total)}</span>
+        <div className="rbuttons">
+          <ExportButton disabled={!lista.length} onClick={() => exportGroupedExcel({ groups, columns, valueColIndex: 4, sheetName: 'Banco de Horas', fileName: 'banco-horas', reportTitle: 'Banco de Horas', dataAtualizacao: data._lastSync })} label="Excel" />
+          <ExportButton disabled={!lista.length} onClick={() => exportToPDF({ title: 'Banco de Horas', groups, columns, valueColIndex: 4, fileName: 'banco-horas', dataAtualizacao: data._lastSync })} label="PDF" />
+        </div>
+      </div>
+      {lista.length === 0 ? <EmptyState icon={Clock} text="Nenhum colaborador cadastrado." /> : (
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, f) => s + saldoFuncionario(f), 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Colaborador</th><th>Cargo</th><th>Status</th><th className="right">Lançamentos</th><th className="right">Saldo</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((f) => {
+                      const saldo = saldoFuncionario(f);
+                      return (
+                        <tr key={f.id}>
+                          <td>{f.nome}</td>
+                          <td className="dim">{f.cargo || '—'}</td>
+                          <td className="dim">{f.ativo ? 'Ativo' : 'Inativo'}</td>
+                          <td className="right dim">{(f.lancamentos || []).length}</td>
+                          <td className="right mono" style={{ color: saldo < 0 ? 'var(--danger)' : undefined }}>{saldo >= 0 ? '+' : ''}{fmtHoras(saldo)}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="subtotal-row"><td colSpan={3}>Subtotal {g.label.replace('Empresa: ', '')}</td><td></td><td className="right mono">{subtotal >= 0 ? '+' : ''}{fmtHoras(subtotal)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          <div className="grand-total-row">
+            <span>Saldo total</span>
+            <span className="mono">{total >= 0 ? '+' : ''}{fmtHoras(total)}</span>
+          </div>
+        </div>
+      )}
       <RptStyle /><ViewStyle />
     </div>
   );

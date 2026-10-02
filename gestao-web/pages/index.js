@@ -3,20 +3,113 @@ import {
   Building2, Landmark, CalendarClock, HandCoins, Plus, X, Trash2, Pencil,
   LayoutDashboard, TrendingDown, AlertCircle, CheckCircle2, FileBarChart,
   ChevronRight, ArrowLeft, Download, ArrowLeftRight, ChevronDown, ChevronUp,
-  CreditCard, Receipt, Percent, RefreshCw,
+  CreditCard, Receipt, Percent, RefreshCw, Shield, ShoppingCart,
+  CalendarDays, Bell, ArrowRight, Clock, Users, LogOut, KeyRound, Lock,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import * as db from '../lib/data';
+import { supabase } from '../lib/supabaseClient';
+
+const ABAS_SISTEMA = [
+  { key: 'dashboard', label: 'Visão geral' },
+  { key: 'agenda', label: 'Agenda' },
+  { key: 'empresas', label: 'Empresas' },
+  { key: 'bancos', label: 'Bancos' },
+  { key: 'contas', label: 'Contas a pagar' },
+  { key: 'emprestimos', label: 'Empréstimos' },
+  { key: 'taxas', label: 'Taxas' },
+  { key: 'seguros', label: 'Seguros' },
+  { key: 'vendas', label: 'Vendas' },
+  { key: 'relatorios', label: 'Relatórios' },
+];
 
 const BANDEIRAS = ['Visa', 'Mastercard', 'Elo', 'American Express', 'Hipercard', 'Outra'];
 const PARCELAS_RANGE = Array.from({ length: 11 }, (_, i) => i + 2);
+const LINHAS_CREDITO = ['PRONAMP', 'FNE', 'FGI', 'Recurso Próprio', 'Parcel. Imp. Fed. PERT III', 'Capital de giro', 'Conta garantida', 'Financiamento', 'Cheque especial', 'Antecipação de recebíveis', 'Desconto de duplicatas', 'Outra'];
+const FORMAS_PAGAMENTO_SEGURO = [
+  { value: 'boleto', label: 'Boleto' },
+  { value: 'debito', label: 'Débito em conta' },
+  { value: 'cartao', label: 'Cartão' },
+];
+const SETORES_VENDA = [
+  { value: 'loja', label: 'Loja' },
+  { value: 'filial', label: 'Filial' },
+  { value: 'maquinas', label: 'Máquinas' },
+  { value: 'assistencia_tecnica', label: 'Assistência Técnica' },
+  { value: 'reparticoes', label: 'Repartições' },
+  { value: 'locacoes', label: 'Locações' },
+];
+const MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+const ANO_INICIAL_VENDAS = 2018;
+function anosDisponiveis() {
+  const atual = new Date().getFullYear();
+  const arr = [];
+  for (let y = atual; y >= ANO_INICIAL_VENDAS; y--) arr.push(y);
+  return arr;
+}
+const TIPOS_COMPROMISSO = [
+  { value: 'compromisso', label: 'Compromisso' },
+  { value: 'obrigacao', label: 'Obrigação' },
+];
+const OPCOES_ALERTA = [
+  { value: 0, label: 'Na hora' },
+  { value: 15, label: '15 min antes' },
+  { value: 30, label: '30 min antes' },
+  { value: 60, label: '1 hora antes' },
+  { value: 180, label: '3 horas antes' },
+  { value: 1440, label: '1 dia antes' },
+  { value: 2880, label: '2 dias antes' },
+];
+const PDF_NAVY = [31, 58, 95];
+const PDF_TEXT = [27, 39, 51];
+const PDF_MUTED_BG = [241, 244, 247];
 
 const fmtBRL = (v) => (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const fmtPct = (v) => (v === null || v === undefined || v === '') ? '—' : `${Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 const fmtDate = (iso) => { if (!iso) return '—'; const [y, m, d] = iso.split('-'); return `${d}/${m}/${y}`; };
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const daysUntil = (iso) => Math.round((new Date(iso) - new Date(todayISO())) / 86400000);
+function addMonthsLocal(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const date = new Date(y, (m - 1) + n, d);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+// ---- Helpers de data+hora (agenda) ----
+// Converte um timestamp ISO para o formato aceito por <input type="datetime-local">
+function toDatetimeLocal(iso) {
+  const d = iso ? new Date(iso) : new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fmtDataHora(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} às ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+// Descrição relativa: "em 2h", "hoje às 14:00", "atrasado 3d"
+function descreveQuando(iso) {
+  const alvo = new Date(iso);
+  const agora = new Date();
+  const diffMin = Math.round((alvo - agora) / 60000);
+  if (diffMin < 0) {
+    const atraso = Math.abs(diffMin);
+    if (atraso < 60) return `atrasado ${atraso} min`;
+    if (atraso < 1440) return `atrasado ${Math.floor(atraso / 60)}h`;
+    return `atrasado ${Math.floor(atraso / 1440)}d`;
+  }
+  if (diffMin < 60) return `em ${diffMin} min`;
+  if (diffMin < 1440) return `em ${Math.floor(diffMin / 60)}h`;
+  return `em ${Math.floor(diffMin / 1440)}d`;
+}
+// Momento em que o alerta deve disparar (data/hora menos os minutos de antecedência)
+function momentoAlerta(c) {
+  return new Date(new Date(c.data_hora).getTime() - (c.alerta_minutos || 0) * 60000);
+}
 
 // ---------- Reusable UI ----------
 
@@ -27,7 +120,7 @@ function Field({ label, children }) {
       {children}
       <style jsx>{`
         .field { display:flex; flex-direction:column; gap:6px; }
-        span { font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#8891A0; }
+        span { font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:var(--text-muted); }
       `}</style>
     </label>
   );
@@ -42,19 +135,19 @@ function Modal({ title, onClose, children }) {
       </div>
       <style jsx>{`
         .backdrop { position:fixed; inset:0; background:rgba(8,10,14,0.72); display:flex; align-items:center; justify-content:center; z-index:50; padding:16px; }
-        .modal { background:#1C222C; border:1px solid #2A3140; border-radius:16px; width:100%; max-width:460px; max-height:88vh; overflow-y:auto; padding:20px; }
+        .modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:100%; max-width:460px; max-height:88vh; overflow-y:auto; padding:20px; box-shadow:0 12px 32px rgba(27,39,51,0.14); }
         .head { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
-        .head h3 { font-family:'Space Grotesk',sans-serif; font-size:18px; color:#E8EAED; margin:0; font-weight:600; }
+        .head h3 { font-family:'Space Grotesk',sans-serif; font-size:18px; color:var(--text); margin:0; font-weight:600; }
         .body { display:flex; flex-direction:column; gap:14px; }
-        .icon-btn { background:none; border:none; color:#8891A0; cursor:pointer; padding:4px; }
+        .icon-btn { background:none; border:none; color:var(--text-muted); cursor:pointer; padding:4px; }
       `}</style>
     </div>
   );
 }
 
 const inputCss = `
-  .input, .select { background:#12161D; border:1px solid #2A3140; border-radius:10px; padding:11px 12px; color:#E8EAED; font-size:15px; outline:none; width:100%; box-sizing:border-box; }
-  .input:focus, .select:focus { border-color:#4FD1AE; }
+  .input, .select { background:var(--surface-alt); border:1px solid var(--border); border-radius:10px; padding:11px 12px; color:var(--text); font-size:15px; outline:none; width:100%; box-sizing:border-box; }
+  .input:focus, .select:focus { border-color:var(--accent); }
 `;
 
 function PrimaryButton({ children, onClick, full, tone }) {
@@ -62,7 +155,7 @@ function PrimaryButton({ children, onClick, full, tone }) {
     <button onClick={onClick} className={`btn ${full ? 'full' : ''}`}>
       {children}
       <style jsx>{`
-        .btn { background:${tone === 'danger' ? '#E2596B' : '#4FD1AE'}; color:#0E1116; border:none; border-radius:10px; padding:12px 18px; font-weight:600; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+        .btn { background:${tone === 'danger' ? 'var(--danger)' : 'var(--accent)'}; color:var(--accent-contrast); border:none; border-radius:10px; padding:12px 18px; font-weight:600; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
         .full { width:100%; }
       `}</style>
     </button>
@@ -74,7 +167,7 @@ function GhostButton({ children, onClick, full }) {
     <button onClick={onClick} className={`btn ${full ? 'full' : ''}`}>
       {children}
       <style jsx>{`
-        .btn { background:transparent; color:#8891A0; border:1px solid #2A3140; border-radius:10px; padding:11px 18px; font-weight:600; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+        .btn { background:transparent; color:var(--text-muted); border:1px solid var(--border); border-radius:10px; padding:11px 18px; font-weight:600; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
         .full { width:100%; }
       `}</style>
     </button>
@@ -87,8 +180,55 @@ function EmptyState({ icon: Icon, text }) {
       <Icon size={28} strokeWidth={1.5} />
       <p>{text}</p>
       <style jsx>{`
-        .empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:48px 20px; color:#5A6272; text-align:center; }
+        .empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:48px 20px; color:var(--text-dim); text-align:center; }
         p { margin:0; font-size:14px; }
+      `}</style>
+    </div>
+  );
+}
+
+// Campo de valor com máscara no padrão brasileiro: milhar separado por ponto,
+// decimais separados por vírgula (ex: 1.234.567,89). Digita-se da direita
+// para a esquerda, como em caixas eletrônicos — os 2 últimos dígitos são
+// sempre os centavos, e o valor cresce por unidade, dezena, centena, milhar...
+function centsToBRL(cents) {
+  return (cents / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function DecimalMaskInput({ value, onChange, placeholder, prefix }) {
+  const [display, setDisplay] = useState(() => {
+    if (value === '' || value === null || value === undefined) return '';
+    return centsToBRL(Math.round(Number(value) * 100));
+  });
+
+  useEffect(() => {
+    if (value === '' || value === null || value === undefined) { setDisplay(''); return; }
+    const expected = centsToBRL(Math.round(Number(value) * 100));
+    // só ressincroniza se o valor externo mudou por outro motivo (ex: carregar edição)
+    if (Number(value) !== Number(parseDisplay(display))) setDisplay(expected);
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function parseDisplay(str) {
+    if (!str) return 0;
+    return Number(str.replace(/\./g, '').replace(',', '.')) || 0;
+  }
+
+  const handleChange = (e) => {
+    const digits = e.target.value.replace(/\D/g, '');
+    if (!digits) { setDisplay(''); onChange(''); return; }
+    const cents = parseInt(digits, 10);
+    setDisplay(centsToBRL(cents));
+    onChange(cents / 100);
+  };
+
+  return (
+    <div className="dmi-wrap">
+      {prefix && <span className="dmi-prefix">{prefix}</span>}
+      <input className="input dmi-input" type="text" inputMode="decimal" value={display} onChange={handleChange} placeholder={placeholder || '0,00'} />
+      <style jsx>{`
+        .dmi-wrap { position:relative; display:flex; align-items:center; }
+        .dmi-prefix { position:absolute; left:12px; color:var(--text-dim); font-size:14px; pointer-events:none; }
+        .dmi-input { ${prefix ? 'padding-left:30px;' : ''} text-align:right; font-family:'IBM Plex Mono',monospace; }
       `}</style>
     </div>
   );
@@ -98,7 +238,7 @@ function SectionTitle({ children }) {
   return (
     <h2 className="st">
       {children}
-      <style jsx>{`.st { font-family:'Space Grotesk',sans-serif; font-size:14px; letter-spacing:.02em; color:#8891A0; margin:20px 0 10px; font-weight:600; text-transform:uppercase; }`}</style>
+      <style jsx>{`.st { font-family:'Space Grotesk',sans-serif; font-size:14px; letter-spacing:.02em; color:var(--text-muted); margin:20px 0 10px; font-weight:600; text-transform:uppercase; }`}</style>
     </h2>
   );
 }
@@ -108,15 +248,21 @@ function ExportButton({ onClick, disabled, label = 'Exportar Excel' }) {
     <button className="exp" onClick={onClick} disabled={disabled}>
       <Download size={14} /> {label}
       <style jsx>{`
-        .exp { display:inline-flex; align-items:center; gap:6px; background:none; border:1px solid #2A3140; color:#4FD1AE; font-size:12.5px; font-weight:600; padding:8px 12px; border-radius:9px; cursor:pointer; }
-        .exp:disabled { color:#5A6272; }
+        .exp { display:inline-flex; align-items:center; gap:6px; background:none; border:1px solid var(--border); color:var(--accent); font-size:12.5px; font-weight:600; padding:8px 12px; border-radius:9px; cursor:pointer; }
+        .exp:disabled { color:var(--text-dim); }
       `}</style>
     </button>
   );
 }
 
+// Formata o valor de uma célula para exibição: colunas marcadas como `money`
+// exibem no padrão brasileiro (R$ 1.234,56) tanto no Excel quanto no PDF.
+function formatCellForExport(col, value) {
+  return col.money ? fmtBRL(value) : value;
+}
+
 function exportToExcel(rows, columns, sheetName, fileName) {
-  const aoa = [columns.map((c) => c.header), ...rows.map((r) => columns.map((c) => c.get(r)))];
+  const aoa = [columns.map((c) => c.header), ...rows.map((r) => columns.map((c) => formatCellForExport(c, c.get(r))))];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = columns.map((c) => ({ wch: c.width || 18 }));
   const wb = XLSX.utils.book_new();
@@ -124,32 +270,134 @@ function exportToExcel(rows, columns, sheetName, fileName) {
   XLSX.writeFile(wb, `${fileName}-${todayISO()}.xlsx`);
 }
 
+// Agrupa linhas por empresa (ou outro critério) e exporta em Excel com
+// cabeçalho de grupo + subtotal, espelhando a organização usada nas telas do app.
+function groupRows(rows, groupKeyFn, groupLabelFn) {
+  const map = new Map();
+  rows.forEach((r) => {
+    const key = groupKeyFn(r);
+    if (!map.has(key)) map.set(key, { label: groupLabelFn(r), rows: [] });
+    map.get(key).rows.push(r);
+  });
+  return Array.from(map.values());
+}
+
+function exportGroupedExcel({ groups, columns, valueColIndex, sheetName, fileName, reportTitle }) {
+  const aoa = [];
+  aoa.push([reportTitle]);
+  aoa.push([`Gerado em ${fmtDate(todayISO())}`]);
+  aoa.push([]);
+  let grandTotal = 0;
+  groups.forEach((g) => {
+    aoa.push([g.label]);
+    aoa.push(columns.map((c) => c.header));
+    let subtotal = 0;
+    g.rows.forEach((r) => {
+      const rawVals = columns.map((c) => c.get(r));
+      if (valueColIndex != null) subtotal += Number(rawVals[valueColIndex]) || 0;
+      const rowVals = columns.map((c, i) => formatCellForExport(c, rawVals[i]));
+      aoa.push(rowVals);
+    });
+    if (valueColIndex != null) {
+      const subtotalRow = columns.map((c, i) => (i === valueColIndex ? formatCellForExport(c, subtotal) : (i === 0 ? 'Subtotal' : '')));
+      aoa.push(subtotalRow);
+      grandTotal += subtotal;
+    }
+    aoa.push([]);
+  });
+  if (valueColIndex != null) {
+    const totalRow = columns.map((c, i) => (i === valueColIndex ? formatCellForExport(c, grandTotal) : (i === 0 ? 'TOTAL GERAL' : '')));
+    aoa.push(totalRow);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = columns.map((c) => ({ wch: c.width || 18 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  XLSX.writeFile(wb, `${fileName}-${todayISO()}.xlsx`);
+}
+
+// Gera um PDF do relatório, agrupado por empresa (ou outro critério), com
+// cabeçalho de seção, subtotal por grupo e total geral — mesma estrutura das telas.
+function exportToPDF({ title, subtitle, groups, columns, valueColIndex, fileName }) {
+  const doc = new jsPDF();
+  doc.setFontSize(15);
+  doc.setTextColor(...PDF_NAVY);
+  doc.text(title, 14, 18);
+  doc.setFontSize(9);
+  doc.setTextColor(120, 130, 140);
+  doc.text(subtitle || `Gerado em ${fmtDate(todayISO())}`, 14, 24);
+
+  let startY = 30;
+  let grandTotal = 0;
+
+  groups.forEach((g) => {
+    doc.setFontSize(11);
+    doc.setTextColor(...PDF_NAVY);
+    doc.text(g.label, 14, startY);
+    startY += 4;
+
+    let subtotal = 0;
+    const body = g.rows.map((r) => columns.map((c, i) => {
+      const v = c.get(r);
+      if (valueColIndex != null && i === valueColIndex) subtotal += Number(v) || 0;
+      return formatCellForExport(c, v);
+    }));
+    if (valueColIndex != null) grandTotal += subtotal;
+
+    const foot = valueColIndex != null
+      ? [columns.map((c, i) => (i === valueColIndex ? fmtBRL(subtotal) : (i === 0 ? 'Subtotal' : '')))]
+      : undefined;
+
+    autoTable(doc, {
+      startY,
+      head: [columns.map((c) => c.header)],
+      body,
+      foot,
+      theme: 'grid',
+      styles: { fontSize: 8.5, textColor: PDF_TEXT, cellPadding: 3 },
+      headStyles: { fillColor: PDF_NAVY, textColor: 255, fontStyle: 'bold' },
+      footStyles: { fillColor: PDF_MUTED_BG, textColor: PDF_TEXT, fontStyle: 'bold' },
+      margin: { left: 14, right: 14 },
+    });
+    startY = doc.lastAutoTable.finalY + 10;
+    if (startY > 260) { doc.addPage(); startY = 20; }
+  });
+
+  if (valueColIndex != null) {
+    doc.setFontSize(11);
+    doc.setTextColor(...PDF_NAVY);
+    doc.text(`Total geral: ${fmtBRL(grandTotal)}`, 14, startY);
+  }
+
+  doc.save(`${fileName}-${todayISO()}.pdf`);
+}
+
 // ---------- Shared card styles ----------
 function ViewStyle() {
   return (
     <style jsx global>{`
       .view { padding:16px 20px 24px; display:flex; flex-direction:column; gap:12px; }
-      .card { background:#1C222C; border:1px solid #2A3140; border-radius:14px; padding:14px 16px; }
+      .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px 16px; box-shadow:0 1px 2px rgba(27,39,51,0.04); }
       .card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; gap:8px; }
-      .card-title { display:flex; align-items:center; gap:8px; font-family:'Space Grotesk',sans-serif; font-size:15px; color:#E8EAED; font-weight:600; }
+      .card-title { display:flex; align-items:center; gap:8px; font-family:'Space Grotesk',sans-serif; font-size:15px; color:var(--text); font-weight:600; }
       .card-actions { display:flex; gap:2px; flex-shrink:0; }
       .card-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; }
-      .k { display:block; font-size:11px; color:#5A6272; text-transform:uppercase; letter-spacing:.03em; margin-bottom:2px; }
-      .v { display:block; font-size:14px; color:#E8EAED; }
+      .k { display:block; font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.03em; margin-bottom:2px; }
+      .v { display:block; font-size:14px; color:var(--text); }
       .mono { font-family:'IBM Plex Mono',monospace; }
-      .icon-btn { background:none; border:none; color:#5A6272; cursor:pointer; padding:5px; border-radius:6px; display:flex; }
-      .icon-btn:hover { color:#4FD1AE; }
-      .icon-btn.danger:hover { color:#E2596B; }
-      .row { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; background:#1C222C; border:1px solid #2A3140; border-radius:12px; margin-bottom:8px; font-size:14px; color:#E8EAED; }
+      .icon-btn { background:none; border:none; color:var(--text-dim); cursor:pointer; padding:5px; border-radius:6px; display:flex; }
+      .icon-btn:hover { color:var(--accent); }
+      .icon-btn.danger:hover { color:var(--danger); }
+      .row { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; background:var(--surface); border:1px solid var(--border); border-radius:12px; margin-bottom:8px; font-size:14px; color:var(--text); }
       .row-sub { font-size:12px; margin-top:2px; }
-      .badge { display:inline-block; background:#12161D; border:1px solid #2A3140; color:#8891A0; font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:6px; margin-left:6px; }
-      .add-inline-btn { display:inline-flex; align-items:center; gap:5px; background:#4FD1AE; color:#0E1116; border:none; border-radius:9px; padding:9px 12px; font-size:12.5px; font-weight:700; cursor:pointer; white-space:nowrap; }
-      .chart-box { background:#1C222C; border:1px solid #2A3140; border-radius:14px; padding:12px 8px 4px; margin-bottom:4px; }
+      .badge { display:inline-block; background:var(--surface-alt); border:1px solid var(--border); color:var(--text-muted); font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:6px; margin-left:6px; }
+      .add-inline-btn { display:inline-flex; align-items:center; gap:5px; background:var(--accent); color:var(--accent-contrast); border:none; border-radius:9px; padding:9px 12px; font-size:12.5px; font-weight:700; cursor:pointer; white-space:nowrap; }
+      .chart-box { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 8px 4px; margin-bottom:4px; box-shadow:0 1px 2px rgba(27,39,51,0.04); }
       .report-filters { display:flex; gap:8px; padding:4px 20px 0; flex-wrap:wrap; }
       .rtable { width:calc(100% - 40px); margin:0 20px; border-collapse:collapse; font-size:13px; }
-      .rtable thead th { text-align:left; font-size:10.5px; text-transform:uppercase; color:#5A6272; padding:0 8px 8px 0; border-bottom:1px solid #2A3140; }
-      .rtable tbody td { padding:10px 8px 10px 0; border-bottom:1px solid #1E2430; color:#E8EAED; }
-      .rtable .dim { color:#8891A0; }
+      .rtable thead th { text-align:left; font-size:10.5px; text-transform:uppercase; color:var(--text-dim); padding:0 8px 8px 0; border-bottom:1px solid var(--border); }
+      .rtable tbody td { padding:10px 8px 10px 0; border-bottom:1px solid var(--border); color:var(--text); }
+      .rtable .dim { color:var(--text-muted); }
       .rtable .right { text-align:right; }
       ${inputCss}
     `}</style>
@@ -160,16 +408,101 @@ function ViewStyle() {
 // MAIN APP
 // ============================================================
 
-export default function Home() {
+// ============================================================
+// PORTA DE ENTRADA: autenticação e carregamento do perfil
+// ============================================================
+
+export default function AppGate() {
+  const [session, setSession] = useState(undefined); // undefined = ainda verificando
+  const [perfil, setPerfil] = useState(null);
+  const [perfilErro, setPerfilErro] = useState(null);
+  const [carregandoPerfil, setCarregandoPerfil] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setPerfil(null); return; }
+    setCarregandoPerfil(true);
+    setPerfilErro(null);
+    db.fetchPerfil(session.user.id)
+      .then((p) => setPerfil(p))
+      .catch(() => setPerfilErro('Seu usuário ainda não tem um perfil liberado. Peça para um administrador configurar seu acesso.'))
+      .finally(() => setCarregandoPerfil(false));
+  }, [session]);
+
+  if (session === undefined) return <CenterMsg text="Carregando…" />;
+  if (!session) return <LoginScreen />;
+  if (carregandoPerfil) return <CenterMsg text="Carregando seu perfil…" />;
+  if (perfilErro) return <CenterMsg text={perfilErro} error onLogout={() => supabase.auth.signOut()} />;
+  if (!perfil) return <CenterMsg text="Perfil não encontrado." error onLogout={() => supabase.auth.signOut()} />;
+
+  return <Home perfil={perfil} />;
+}
+
+function LoginScreen() {
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState('');
+  const [carregando, setCarregando] = useState(false);
+
+  const entrar = async () => {
+    if (!email || !senha) return;
+    setCarregando(true);
+    setErro('');
+    const { error } = await db.signIn(email, senha);
+    if (error) setErro('E-mail ou senha incorretos.');
+    setCarregando(false);
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-box">
+        <div className="login-icon"><Lock size={22} /></div>
+        <h1>Gestão Empresarial</h1>
+        <p className="login-sub">Entre com seu e-mail e senha para continuar.</p>
+        <Field label="E-mail"><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seu@email.com" autoFocus /></Field>
+        <Field label="Senha"><input className="input" type="password" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="••••••••" onKeyDown={(e) => e.key === 'Enter' && entrar()} /></Field>
+        {erro && <p className="login-erro">{erro}</p>}
+        <PrimaryButton full onClick={entrar}>{carregando ? 'Entrando…' : 'Entrar'}</PrimaryButton>
+      </div>
+      <style jsx>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&display=swap');
+        .login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); padding:20px; }
+        .login-box { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:32px 26px; width:100%; max-width:360px; box-shadow:0 8px 28px rgba(27,39,51,0.08); display:flex; flex-direction:column; gap:14px; }
+        .login-icon { width:44px; height:44px; border-radius:11px; background:var(--accent-soft-12); color:var(--accent); display:flex; align-items:center; justify-content:center; margin-bottom:4px; }
+        h1 { font-family:'Space Grotesk',sans-serif; font-size:20px; color:var(--text); margin:0; font-weight:700; }
+        .login-sub { font-size:13px; color:var(--text-muted); margin:0 0 6px; }
+        .login-erro { color:var(--danger); font-size:13px; margin:0; }
+      `}</style>
+      <style jsx>{inputCss}</style>
+    </div>
+  );
+}
+
+// ============================================================
+// APP PRINCIPAL
+// ============================================================
+
+function Home({ perfil }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState(null);
-  const [tab, setTab] = useState('dashboard');
+  const isAdmin = perfil.papel === 'admin';
+  const abasPermitidas = isAdmin ? [...ABAS_SISTEMA.map((a) => a.key), 'usuarios'] : (perfil.abas || []);
+  const [tab, setTab] = useState(abasPermitidas[0] || 'dashboard');
   const [modal, setModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [reportView, setReportView] = useState(null);
   const [taxasSub, setTaxasSub] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [alertaAtivo, setAlertaAtivo] = useState(null);   // compromisso exibido no popup
+  const [adiados, setAdiados] = useState({});              // id -> timestamp até quando ficar silenciado
 
   const reload = async () => {
     try {
@@ -186,14 +519,42 @@ export default function Home() {
 
   useEffect(() => { reload(); }, []);
 
+  // Verifica a cada 30s se alguma ação da agenda chegou na hora de alertar.
+  // Mostra uma ação por vez; ações adiadas ficam silenciadas até o horário escolhido.
+  useEffect(() => {
+    if (!data?.compromissos) return;
+    const verificar = () => {
+      if (alertaAtivo) return;
+      const agora = new Date();
+      const pendente = data.compromissos
+        .filter((c) => c.status === 'pendente' && !c.alertado)
+        .filter((c) => momentoAlerta(c) <= agora)
+        .filter((c) => !adiados[c.id] || adiados[c.id] <= agora.getTime())
+        .sort((a, b) => a.data_hora.localeCompare(b.data_hora))[0];
+      if (pendente) setAlertaAtivo(pendente);
+    };
+    verificar();
+    const timer = setInterval(verificar, 30000);
+    return () => clearInterval(timer);
+  }, [data, alertaAtivo, adiados]);
+
+  // Recarrega os dados periodicamente para captar ações criadas em outro dispositivo
+  useEffect(() => {
+    const timer = setInterval(() => { reload(); }, 300000); // a cada 5 min
+    return () => clearInterval(timer);
+  }, []);
+
   const withSave = async (fn) => {
     setSaving(true);
-    try { await fn(); await reload(); } catch (e) { console.error(e); alert('Erro ao salvar. Tente novamente.'); }
+    try { await fn(); await reload(); } catch (e) { console.error(e); alert(`Erro ao salvar: ${e?.message || 'tente novamente.'}`); }
     setSaving(false);
   };
 
   if (loading) return <CenterMsg text="Carregando…" />;
   if (errorMsg) return <CenterMsg text={errorMsg} error />;
+  if (abasPermitidas.length === 0) {
+    return <CenterMsg text="Seu usuário ainda não tem nenhuma aba liberada. Peça para um administrador liberar o acesso." onLogout={() => db.signOut()} />;
+  }
 
   const saldoTotal = data.bancos.reduce((s, b) => s + (Number(b.saldo) || 0), 0);
 
@@ -209,8 +570,11 @@ export default function Home() {
           <span>·</span>
           <span>{data.bancos.length} conta{data.bancos.length === 1 ? '' : 's'} bancária{data.bancos.length === 1 ? '' : 's'}</span>
           <button className="refresh-btn" onClick={reload} title="Atualizar"><RefreshCw size={13} /></button>
+          <button className="refresh-btn" onClick={() => db.signOut()} title="Sair"><LogOut size={13} /></button>
         </div>
       </header>
+
+      <div className="usuario-tag">{perfil.nome}{isAdmin ? ' · admin' : ''}</div>
 
       <main className="content">
         {tab === 'dashboard' && <Dashboard data={data} onGoReports={() => setTab('relatorios')} />}
@@ -223,11 +587,13 @@ export default function Home() {
             onEdit={(it) => setModal({ type: 'banco', item: it })}
             onDelete={(id, label) => setConfirmDelete({ type: 'banco', id, label })}
             onNewTransfer={() => setModal({ type: 'transferencia', item: null })}
-            onDeleteTransfer={(t) => withSave(() => db.excluirTransferencia(t, data.bancos))} />
+            onDeleteTransfer={(t) => withSave(() => db.excluirTransferencia(t, data.bancos))}
+            onEditDados={(it) => setModal({ type: 'dados-bancarios', item: it })} />
         )}
         {tab === 'contas' && (
           <ContasView data={data}
-            onToggle={(c) => withSave(() => db.toggleContaStatus(c))}
+            onDarBaixa={(c, dataPagamento) => withSave(() => db.darBaixaConta(c, dataPagamento))}
+            onReverterBaixa={(c) => withSave(() => db.reverterBaixaConta(c))}
             onEdit={(it) => setModal({ type: 'conta', item: it })}
             onDelete={(id, label) => setConfirmDelete({ type: 'conta', id, label })} />
         )}
@@ -235,7 +601,8 @@ export default function Home() {
           <EmprestimosView data={data}
             onEdit={(it) => setModal({ type: 'emprestimo', item: it })}
             onDelete={(id, label) => setConfirmDelete({ type: 'emprestimo', id, label })}
-            onToggleParcela={(p) => withSave(() => db.toggleParcela(p))} />
+            onToggleParcela={(p) => withSave(() => db.toggleParcela(p))}
+            onGoReport={(view) => { setTab('relatorios'); setReportView(view); }} />
         )}
         {tab === 'taxas' && (
           <TaxasHome data={data} sub={taxasSub} setSub={setTaxasSub}
@@ -246,11 +613,35 @@ export default function Home() {
             onEditBoleto={(it) => setModal({ type: 'boleto', item: it })}
             onDeleteBoleto={(id, label) => setConfirmDelete({ type: 'boleto', id, label })} />
         )}
+        {tab === 'seguros' && (
+          <SegurosView data={data}
+            onEdit={(it) => setModal({ type: 'seguro', item: it })}
+            onDelete={(id, label) => setConfirmDelete({ type: 'seguro', id, label })}
+            onGoReport={() => { setTab('relatorios'); setReportView('seguros'); }} />
+        )}
+        {tab === 'vendas' && (
+          <VendasView data={data}
+            onSaveMes={(v) => withSave(() => db.saveVendaMes(v))}
+            onGoReport={() => { setTab('relatorios'); setReportView('vendas'); }} />
+        )}
+        {tab === 'agenda' && (
+          <AgendaView data={data}
+            onEdit={(it) => setModal({ type: 'compromisso', item: it })}
+            onDelete={(id, label) => setConfirmDelete({ type: 'compromisso', id, label })}
+            onConcluir={(c) => withSave(() => db.concluirCompromisso(c.id))}
+            onReabrir={(c) => withSave(() => db.reabrirCompromisso(c.id))}
+            onProximoPasso={(c) => setModal({ type: 'proximo-passo', item: c })} />
+        )}
         {tab === 'relatorios' && <ReportsHome view={reportView} setView={setReportView} data={data} />}
+        {tab === 'usuarios' && isAdmin && (
+          <UsuariosView
+            usuarioAtualId={perfil.id}
+            onGoRefresh={reload} />
+        )}
       </main>
 
-      {['empresas', 'bancos', 'contas', 'emprestimos'].includes(tab) && (
-        <button className="fab" onClick={() => setModal({ type: tab === 'empresas' ? 'empresa' : tab === 'bancos' ? 'banco' : tab === 'contas' ? 'conta' : 'emprestimo', item: null })}>
+      {['empresas', 'bancos', 'contas', 'emprestimos', 'seguros', 'agenda'].includes(tab) && (
+        <button className="fab" onClick={() => setModal({ type: tab === 'empresas' ? 'empresa' : tab === 'bancos' ? 'banco' : tab === 'contas' ? 'conta' : tab === 'emprestimos' ? 'emprestimo' : tab === 'agenda' ? 'compromisso' : 'seguro', item: null })}>
           <Plus size={24} />
         </button>
       )}
@@ -258,13 +649,17 @@ export default function Home() {
       <nav className="tabbar">
         {[
           { key: 'dashboard', label: 'Geral', icon: LayoutDashboard },
+          { key: 'agenda', label: 'Agenda', icon: CalendarDays },
           { key: 'empresas', label: 'Empresas', icon: Building2 },
           { key: 'bancos', label: 'Bancos', icon: Landmark },
           { key: 'contas', label: 'A pagar', icon: CalendarClock },
           { key: 'emprestimos', label: 'Empréstimos', icon: HandCoins },
           { key: 'taxas', label: 'Taxas', icon: Percent },
+          { key: 'seguros', label: 'Seguros', icon: Shield },
+          { key: 'vendas', label: 'Vendas', icon: ShoppingCart },
           { key: 'relatorios', label: 'Relatórios', icon: FileBarChart },
-        ].map(({ key, label, icon: Icon }) => (
+          ...(isAdmin ? [{ key: 'usuarios', label: 'Usuários', icon: Users }] : []),
+        ].filter((t) => abasPermitidas.includes(t.key)).map(({ key, label, icon: Icon }) => (
           <button key={key} className={`tab ${tab === key ? 'active' : ''}`} onClick={() => { setTab(key); setReportView(null); setTaxasSub(null); }}>
             <Icon size={19} strokeWidth={tab === key ? 2.2 : 1.6} /><span>{label}</span>
           </button>
@@ -273,15 +668,19 @@ export default function Home() {
 
       {modal?.type === 'empresa' && <EmpresaForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveEmpresa(v); setModal(null); })} />}
       {modal?.type === 'banco' && <BancoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveBanco(v); setModal(null); })} />}
+      {modal?.type === 'dados-bancarios' && <DadosBancariosForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveDadosBancarios(v); setModal(null); })} />}
       {modal?.type === 'conta' && <ContaForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveConta(v); setModal(null); })} />}
       {modal?.type === 'emprestimo' && <EmprestimoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveEmprestimo(v, modal.item?.parcelas || []); setModal(null); })} />}
       {modal?.type === 'transferencia' && <TransferForm bancos={data.bancos} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.criarTransferencia(v, data.bancos); setModal(null); })} />}
       {modal?.type === 'cartao' && <CartaoTaxaForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveTaxaCartao(v); setModal(null); })} />}
       {modal?.type === 'boleto' && <BoletoTaxaForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveTaxaBoleto(v); setModal(null); })} />}
+      {modal?.type === 'seguro' && <SeguroForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveSeguro(v); setModal(null); })} />}
+      {modal?.type === 'compromisso' && <CompromissoForm item={modal.item} empresas={data.empresas} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.saveCompromisso(v); setModal(null); })} />}
+      {modal?.type === 'proximo-passo' && <ProximoPassoForm anterior={modal.item} onClose={() => setModal(null)} onSave={(v) => withSave(async () => { await db.criarProximoPasso(modal.item, v); setModal(null); })} />}
 
       {confirmDelete && (
         <Modal title="Excluir registro" onClose={() => setConfirmDelete(null)}>
-          <p style={{ color: '#B7BEC9', fontSize: 14, margin: 0 }}>Tem certeza que deseja excluir <strong style={{ color: '#E8EAED' }}>{confirmDelete.label}</strong>? Essa ação não pode ser desfeita.</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: 14, margin: 0 }}>Tem certeza que deseja excluir <strong style={{ color: 'var(--text)' }}>{confirmDelete.label}</strong>? Essa ação não pode ser desfeita.</p>
           <div style={{ display: 'flex', gap: 10 }}>
             <GhostButton full onClick={() => setConfirmDelete(null)}>Cancelar</GhostButton>
             <PrimaryButton full tone="danger" onClick={() => withSave(async () => {
@@ -292,10 +691,38 @@ export default function Home() {
               if (type === 'emprestimo') await db.deleteEmprestimo(id);
               if (type === 'cartao') await db.deleteTaxaCartao(id);
               if (type === 'boleto') await db.deleteTaxaBoleto(id);
+              if (type === 'seguro') await db.deleteSeguro(id);
+              if (type === 'compromisso') await db.deleteCompromisso(id);
               setConfirmDelete(null);
             })}>Excluir</PrimaryButton>
           </div>
         </Modal>
+      )}
+
+      {alertaAtivo && (
+        <AlertaPopup
+          compromisso={alertaAtivo}
+          onAdiar={() => {
+            setAdiados((prev) => ({ ...prev, [alertaAtivo.id]: Date.now() + 10 * 60000 }));
+            setAlertaAtivo(null);
+          }}
+          onConcluir={() => {
+            const alvo = alertaAtivo;
+            setAlertaAtivo(null);
+            withSave(() => db.concluirCompromisso(alvo.id));
+          }}
+          onVerAgenda={() => {
+            const alvo = alertaAtivo;
+            setAlertaAtivo(null);
+            setTab('agenda');
+            db.marcarAlertado(alvo.id).then(reload).catch(() => {});
+          }}
+          onFechar={() => {
+            const alvo = alertaAtivo;
+            setAlertaAtivo(null);
+            db.marcarAlertado(alvo.id).then(reload).catch(() => {});
+          }}
+        />
       )}
 
       {saving && <div className="saving-overlay">Salvando…</div>}
@@ -305,29 +732,33 @@ export default function Home() {
         body { font-family:'Inter',sans-serif; }
       `}</style>
       <style jsx>{`
-        .app { min-height:100vh; background:#0E1116; display:flex; flex-direction:column; max-width:520px; margin:0 auto; position:relative; }
-        .header { padding:20px 20px 18px; border-bottom:1px solid #1E2430; }
-        .eyebrow { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:#5A6272; margin-bottom:4px; }
-        .saldo-total { font-family:'IBM Plex Mono',monospace; font-size:32px; font-weight:600; color:#E8EAED; }
-        .header-meta { margin-top:8px; display:flex; align-items:center; gap:8px; font-size:12px; color:#5A6272; }
-        .refresh-btn { margin-left:auto; background:none; border:1px solid #2A3140; color:#8891A0; border-radius:6px; padding:4px 6px; cursor:pointer; display:flex; }
+        .app { min-height:100vh; background:var(--bg); display:flex; flex-direction:column; max-width:520px; margin:0 auto; position:relative; }
+        .header { padding:20px 20px 18px; border-bottom:1px solid var(--border); }
+        .eyebrow { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim); margin-bottom:4px; }
+        .saldo-total { font-family:'IBM Plex Mono',monospace; font-size:32px; font-weight:600; color:var(--text); }
+        .header-meta { margin-top:8px; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-dim); }
+        .refresh-btn { margin-left:auto; background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 6px; cursor:pointer; display:flex; }
+        .usuario-tag { padding:6px 20px 0; font-size:11.5px; color:var(--text-dim); }
         .content { flex:1; overflow-y:auto; padding-bottom:70px; }
-        .fab { position:fixed; right:calc(50% - 260px + 20px); bottom:80px; width:52px; height:52px; border-radius:50%; background:#4FD1AE; color:#0E1116; border:none; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 18px rgba(79,209,174,0.35); cursor:pointer; z-index:10; }
+        .fab { position:fixed; right:calc(50% - 260px + 20px); bottom:80px; width:52px; height:52px; border-radius:50%; background:var(--accent); color:var(--accent-contrast); border:none; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 18px var(--accent-shadow); cursor:pointer; z-index:10; }
         @media (max-width: 560px) { .fab { right:20px; } }
-        .tabbar { position:fixed; bottom:0; left:0; right:0; max-width:520px; margin:0 auto; display:flex; background:#12161D; border-top:1px solid #1E2430; padding:6px 2px calc(6px + env(safe-area-inset-bottom)); z-index:20; overflow-x:auto; }
-        .tab { flex:1; min-width:58px; display:flex; flex-direction:column; align-items:center; gap:3px; background:none; border:none; color:#5A6272; padding:6px 1px; cursor:pointer; }
+        .tabbar { position:fixed; bottom:0; left:0; right:0; max-width:520px; margin:0 auto; display:flex; background:var(--surface-alt); border-top:1px solid var(--border); padding:6px 2px calc(6px + env(safe-area-inset-bottom)); z-index:20; overflow-x:auto; }
+        .tab { flex:1; min-width:58px; display:flex; flex-direction:column; align-items:center; gap:3px; background:none; border:none; color:var(--text-dim); padding:6px 1px; cursor:pointer; }
         .tab span { font-size:9.5px; }
-        .tab.active { color:#4FD1AE; }
-        .saving-overlay { position:fixed; top:12px; left:50%; transform:translateX(-50%); background:#1C222C; border:1px solid #2A3140; color:#4FD1AE; font-size:12.5px; padding:8px 14px; border-radius:20px; z-index:60; }
+        .tab.active { color:var(--accent); }
+        .saving-overlay { position:fixed; top:12px; left:50%; transform:translateX(-50%); background:var(--surface); border:1px solid var(--border); color:var(--accent); font-size:12.5px; padding:8px 14px; border-radius:20px; z-index:60; }
       `}</style>
     </div>
   );
 }
 
-function CenterMsg({ text, error }) {
+function CenterMsg({ text, error, onLogout }) {
   return (
-    <div style={{ minHeight: '100vh', background: '#0E1116', display: 'flex', alignItems: 'center', justifyContent: 'center', color: error ? '#E2596B' : '#5A6272', fontFamily: 'Inter,sans-serif', padding: 24, textAlign: 'center' }}>
-      {text}
+    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'center', justifyContent: 'center', color: error ? 'var(--danger)' : 'var(--text-dim)', fontFamily: 'Inter,sans-serif', padding: 24, textAlign: 'center' }}>
+      <div>{text}</div>
+      {onLogout && (
+        <button onClick={onLogout} style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 13, fontWeight: 600, padding: '9px 16px', borderRadius: 9, cursor: 'pointer' }}>Sair</button>
+      )}
     </div>
   );
 }
@@ -342,6 +773,14 @@ function Dashboard({ data, onGoReports }) {
     name: emp.nome.length > 10 ? emp.nome.slice(0, 9) + '…' : emp.nome,
     valor: data.bancos.filter((b) => b.empresa_id === emp.id).reduce((s, b) => s + (Number(b.saldo) || 0), 0),
   }));
+  const segurosVencendo = (data.seguros || [])
+    .filter((s) => statusSeguro(s.vigencia_fim) !== 'vigente')
+    .sort((a, b) => a.vigencia_fim.localeCompare(b.vigencia_fim))
+    .slice(0, 5);
+  const agendaProxima = (data.compromissos || [])
+    .filter((c) => c.status === 'pendente')
+    .sort((a, b) => a.data_hora.localeCompare(b.data_hora))
+    .slice(0, 5);
 
   if (!data.empresas.length && !data.bancos.length) {
     return <EmptyState icon={Building2} text="Cadastre sua primeira empresa para começar." />;
@@ -350,8 +789,8 @@ function Dashboard({ data, onGoReports }) {
   return (
     <div className="dash">
       <div className="cards-row">
-        <div className="stat-card"><TrendingDown size={16} color="#E8A33D" /><div className="stat-label">A pagar (pendente)</div><div className="stat-value">{fmtBRL(totalPendente)}</div></div>
-        <div className="stat-card"><HandCoins size={16} color="#E2596B" /><div className="stat-label">Empréstimos ativos</div><div className="stat-value">{fmtBRL(totalEmprestimos)}</div></div>
+        <div className="stat-card"><TrendingDown size={16} color="var(--warning)" /><div className="stat-label">A pagar (pendente)</div><div className="stat-value">{fmtBRL(totalPendente)}</div></div>
+        <div className="stat-card"><HandCoins size={16} color="var(--danger)" /><div className="stat-label">Empréstimos ativos</div><div className="stat-value">{fmtBRL(totalEmprestimos)}</div></div>
       </div>
 
       {saldoPorEmpresa.length > 0 && (
@@ -360,13 +799,34 @@ function Dashboard({ data, onGoReports }) {
           <div className="chart-box">
             <ResponsiveContainer width="100%" height={Math.max(120, saldoPorEmpresa.length * 42)}>
               <BarChart data={saldoPorEmpresa} layout="vertical" margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1E2430" horizontal={false} />
-                <XAxis type="number" tick={{ fill: '#5A6272', fontSize: 10 }} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
-                <YAxis type="category" dataKey="name" tick={{ fill: '#8891A0', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
-                <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ background: '#1C222C', border: '1px solid #2A3140', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: '#E8EAED' }} />
-                <Bar dataKey="valor" fill="#4FD1AE" radius={[0, 4, 4, 0]} barSize={16} />
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                <XAxis type="number" tick={{ fill: 'var(--text-dim)', fontSize: 10 }} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
+                <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+                <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: 'var(--text)' }} />
+                <Bar dataKey="valor" fill="var(--accent)" radius={[0, 4, 4, 0]} barSize={16} />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        </>
+      )}
+
+      {agendaProxima.length > 0 && (
+        <>
+          <SectionTitle>Agenda · próximas ações</SectionTitle>
+          <div className="list">
+            {agendaProxima.map((c) => {
+              const atrasado = new Date(c.data_hora) < new Date();
+              return (
+                <div key={c.id} className="row">
+                  <div>
+                    <div>{c.tipo === 'obrigacao' ? <Shield size={12} style={{ marginRight: 5, verticalAlign: -1 }} /> : <CalendarDays size={12} style={{ marginRight: 5, verticalAlign: -1 }} />}{c.titulo}</div>
+                    <div className="row-sub" style={{ color: atrasado ? 'var(--danger)' : 'var(--text-dim)' }}>
+                      {fmtDataHora(c.data_hora)} · {descreveQuando(c.data_hora)}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -380,7 +840,7 @@ function Dashboard({ data, onGoReports }) {
               <div key={c.id} className="row">
                 <div>
                   <div>{c.descricao}</div>
-                  <div className="row-sub" style={{ color: dias <= 3 ? '#E2596B' : '#5A6272' }}>
+                  <div className="row-sub" style={{ color: dias <= 3 ? 'var(--danger)' : 'var(--text-dim)' }}>
                     {fmtDate(c.data_vencimento)} {dias === 0 ? '· vence hoje' : dias < 0 ? `· atrasada ${Math.abs(dias)}d` : `· em ${dias}d`}
                   </div>
                 </div>
@@ -391,16 +851,38 @@ function Dashboard({ data, onGoReports }) {
         </div>
       )}
 
+      {segurosVencendo.length > 0 && (
+        <>
+          <SectionTitle>Seguros vencendo</SectionTitle>
+          <div className="list">
+            {segurosVencendo.map((s) => {
+              const dias = daysUntil(s.vigencia_fim);
+              return (
+                <div key={s.id} className="row">
+                  <div>
+                    <div><Shield size={12} style={{ marginRight: 5, verticalAlign: -1 }} />{s.objeto}</div>
+                    <div className="row-sub" style={{ color: dias < 0 ? 'var(--danger)' : 'var(--warning)' }}>
+                      {fmtDate(s.vigencia_fim)} {dias < 0 ? `· vencido há ${Math.abs(dias)}d` : `· vence em ${dias}d`}
+                    </div>
+                  </div>
+                  <SeguroStatusBadge vigenciaFim={s.vigencia_fim} />
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
       <button className="reports-link" onClick={onGoReports}><FileBarChart size={16} /> Ver relatórios completos <ChevronRight size={15} /></button>
 
       <style jsx>{`
         .dash { padding:16px 20px 24px; display:flex; flex-direction:column; gap:4px; }
         .cards-row { display:flex; gap:10px; margin-bottom:8px; }
-        .stat-card { flex:1; background:#1C222C; border:1px solid #2A3140; border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:6px; }
-        .stat-label { font-size:12px; color:#8891A0; }
-        .stat-value { font-family:'IBM Plex Mono',monospace; font-size:18px; color:#E8EAED; font-weight:600; }
-        .muted { color:#5A6272; font-size:14px; padding:8px 0 16px; }
-        .reports-link { margin-top:18px; display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:#1C222C; border:1px solid #2A3140; color:#4FD1AE; font-weight:600; font-size:13px; padding:13px; border-radius:12px; cursor:pointer; }
+        .stat-card { flex:1; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:6px; box-shadow:0 1px 2px rgba(27,39,51,0.04); }
+        .stat-label { font-size:12px; color:var(--text-muted); }
+        .stat-value { font-family:'IBM Plex Mono',monospace; font-size:18px; color:var(--text); font-weight:600; }
+        .muted { color:var(--text-dim); font-size:14px; padding:8px 0 16px; }
+        .reports-link { margin-top:18px; display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--surface); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13px; padding:13px; border-radius:12px; cursor:pointer; }
       `}</style>
       <ViewStyle />
     </div>
@@ -439,12 +921,90 @@ function EmpresasView({ data, onEdit, onDelete }) {
 
 // ---------- Bancos ----------
 
-function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer }) {
+function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer, onEditDados }) {
+  const [sub, setSub] = useState('saldos'); // saldos | dados
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
   const bancoNome = (id) => data.bancos.find((b) => b.id === id)?.nome_banco || '—';
   const transfers = [...data.transferencias].sort((a, b) => b.data.localeCompare(a.data));
+
+  const subTabs = (
+    <div className="sub-tabs">
+      <button className={sub === 'saldos' ? 'active' : ''} onClick={() => setSub('saldos')}>Saldos</button>
+      <button className={sub === 'dados' ? 'active' : ''} onClick={() => setSub('dados')}>Dados bancários</button>
+      <style jsx>{`
+        .sub-tabs { display:flex; gap:6px; margin-bottom:12px; }
+        .sub-tabs button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer; }
+        .sub-tabs button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </div>
+  );
+
+  if (sub === 'dados') {
+    // Agrupa as contas bancárias por empresa
+    const grupos = data.empresas
+      .map((emp) => ({ empresa: emp, bancos: data.bancos.filter((b) => b.empresa_id === emp.id) }))
+      .filter((g) => g.bancos.length > 0);
+
+    return (
+      <div className="view">
+        {subTabs}
+        {grupos.length === 0 ? (
+          <EmptyState icon={Landmark} text="Nenhum banco cadastrado. Volte em 'Saldos' e toque em + para adicionar." />
+        ) : grupos.map((g) => (
+          <div key={g.empresa.id} className="empresa-block">
+            <div className="empresa-head"><Building2 size={14} /> {g.empresa.nome}</div>
+            {g.bancos.map((b) => (
+              <div key={b.id} className="card">
+                <div className="card-head">
+                  <div className="card-title"><Landmark size={16} /> {b.nome_banco}</div>
+                  <div className="card-actions">
+                    <button className="icon-btn" onClick={() => onEditDados({
+                      id: b.id, nomeBanco: b.nome_banco, agencia: b.agencia, conta: b.conta,
+                      limiteConta: b.limite_conta, limitePagamento: b.limite_pagamento,
+                      limitePix: b.limite_pix, limiteContaCadastrada: b.limite_conta_cadastrada,
+                      gerenteNome: b.gerente_nome, gerenteContato: b.gerente_contato,
+                    })}><Pencil size={16} /></button>
+                  </div>
+                </div>
+                <div className="card-grid">
+                  <div><span className="k">Agência</span><span className="v mono">{b.agencia || '—'}</span></div>
+                  <div><span className="k">Conta</span><span className="v mono">{b.conta || '—'}</span></div>
+                </div>
+                <div className="limites-grid">
+                  <div><span className="k">Limite da conta</span><span className="v mono">{b.limite_conta != null ? fmtBRL(b.limite_conta) : '—'}</span></div>
+                  <div><span className="k">Limite de pagamento</span><span className="v mono">{b.limite_pagamento != null ? fmtBRL(b.limite_pagamento) : '—'}</span></div>
+                  <div><span className="k">Limite de Pix</span><span className="v mono">{b.limite_pix != null ? fmtBRL(b.limite_pix) : '—'}</span></div>
+                  <div><span className="k">Limite conta cadastrada</span><span className="v mono">{b.limite_conta_cadastrada != null ? fmtBRL(b.limite_conta_cadastrada) : '—'}</span></div>
+                </div>
+                {(b.gerente_nome || b.gerente_contato) && (
+                  <div className="gerente-box">
+                    <span className="k">Gerente da conta</span>
+                    <div className="gerente-linha">
+                      <span className="v">{b.gerente_nome || '—'}</span>
+                      {b.gerente_contato && <span className="gerente-contato">{b.gerente_contato}</span>}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+        <style jsx>{`
+          .empresa-block { display:flex; flex-direction:column; gap:10px; margin-bottom:8px; }
+          .empresa-head { display:flex; align-items:center; gap:6px; font-family:'Space Grotesk',sans-serif; font-size:13.5px; color:var(--accent); font-weight:600; }
+          .limites-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+          .gerente-box { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+          .gerente-linha { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+          .gerente-contato { font-size:13px; color:var(--accent); font-family:'IBM Plex Mono',monospace; }
+        `}</style>
+        <ViewStyle />
+      </div>
+    );
+  }
+
   return (
     <div className="view">
+      {subTabs}
       {data.bancos.length >= 2 && (
         <button className="transfer-btn" onClick={onNewTransfer}><ArrowLeftRight size={16} /> Nova transferência entre bancos</button>
       )}
@@ -483,9 +1043,9 @@ function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer })
         </>
       )}
       <style jsx>{`
-        .transfer-btn { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:rgba(79,209,174,0.1); border:1px solid #2A3140; color:#4FD1AE; font-weight:600; font-size:13.5px; padding:12px; border-radius:12px; cursor:pointer; margin-bottom:4px; }
+        .transfer-btn { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--accent-soft-10); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13.5px; padding:12px; border-radius:12px; cursor:pointer; margin-bottom:4px; }
         .transfer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
-        .transfer-path { display:flex; align-items:center; gap:6px; font-size:13.5px; color:#E8EAED; font-weight:600; }
+        .transfer-path { display:flex; align-items:center; gap:6px; font-size:13.5px; color:var(--text); font-weight:600; }
         .transfer-actions { display:flex; align-items:center; gap:8px; }
       `}</style>
       <ViewStyle />
@@ -493,9 +1053,51 @@ function BancosView({ data, onEdit, onDelete, onNewTransfer, onDeleteTransfer })
   );
 }
 
+function DadosBancariosForm({ item, onClose, onSave }) {
+  const [agencia, setAgencia] = useState(item?.agencia || '');
+  const [conta, setConta] = useState(item?.conta || '');
+  const [limiteConta, setLimiteConta] = useState(item?.limiteConta ?? '');
+  const [limitePagamento, setLimitePagamento] = useState(item?.limitePagamento ?? '');
+  const [limitePix, setLimitePix] = useState(item?.limitePix ?? '');
+  const [limiteContaCadastrada, setLimiteContaCadastrada] = useState(item?.limiteContaCadastrada ?? '');
+  const [gerenteNome, setGerenteNome] = useState(item?.gerenteNome || '');
+  const [gerenteContato, setGerenteContato] = useState(item?.gerenteContato || '');
+
+  const num = (v) => (v === '' || v === null || v === undefined ? null : parseFloat(v));
+
+  return (
+    <Modal title={`Dados bancários · ${item?.nomeBanco || ''}`} onClose={onClose}>
+      <Field label="Agência"><input className="input" value={agencia} onChange={(e) => setAgencia(e.target.value)} placeholder="Ex: 1234-5" /></Field>
+      <Field label="Conta"><input className="input" value={conta} onChange={(e) => setConta(e.target.value)} placeholder="Ex: 12345-6" /></Field>
+
+      <SectionTitle>Limites</SectionTitle>
+      <Field label="Limite da conta (R$)"><DecimalMaskInput value={limiteConta} onChange={setLimiteConta} /></Field>
+      <Field label="Limite de pagamento (R$)"><DecimalMaskInput value={limitePagamento} onChange={setLimitePagamento} /></Field>
+      <Field label="Limite de Pix (R$)"><DecimalMaskInput value={limitePix} onChange={setLimitePix} /></Field>
+      <Field label="Limite conta cadastrada (R$)"><DecimalMaskInput value={limiteContaCadastrada} onChange={setLimiteContaCadastrada} /></Field>
+
+      <SectionTitle>Gerente da conta</SectionTitle>
+      <Field label="Nome do gerente"><input className="input" value={gerenteNome} onChange={(e) => setGerenteNome(e.target.value)} placeholder="Nome completo" /></Field>
+      <Field label="Contato do gerente"><input className="input" value={gerenteContato} onChange={(e) => setGerenteContato(e.target.value)} placeholder="Telefone ou e-mail" /></Field>
+
+      <PrimaryButton full onClick={() => onSave({
+        id: item.id,
+        agencia: agencia.trim(), conta: conta.trim(),
+        limiteConta: num(limiteConta), limitePagamento: num(limitePagamento),
+        limitePix: num(limitePix), limiteContaCadastrada: num(limiteContaCadastrada),
+        gerenteNome: gerenteNome.trim(), gerenteContato: gerenteContato.trim(),
+      })}>Salvar dados bancários</PrimaryButton>
+      <style jsx>{inputCss}</style>
+    </Modal>
+  );
+}
+
 // ---------- Contas a pagar ----------
 
-function ContasView({ data, onToggle, onEdit, onDelete }) {
+function ContasView({ data, onDarBaixa, onReverterBaixa, onEdit, onDelete }) {
+  const [baixaAlvo, setBaixaAlvo] = useState(null); // conta pendente que está recebendo baixa
+  const [reverterAlvo, setReverterAlvo] = useState(null); // conta paga a reverter
+
   if (!data.contas.length) return <EmptyState icon={CalendarClock} text="Nenhuma conta cadastrada. Toque em + para adicionar." />;
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
   const sorted = [...data.contas].sort((a, b) => a.data_vencimento.localeCompare(b.data_vencimento));
@@ -515,53 +1117,105 @@ function ContasView({ data, onToggle, onEdit, onDelete }) {
             </div>
             <div className="card-grid">
               <div><span className="k">Empresa</span><span className="v">{empresaNome(c.empresa_id)}</span></div>
-              <div><span className="k">Vencimento</span><span className="v" style={{ color: atrasada ? '#E2596B' : undefined }}>{fmtDate(c.data_vencimento)}</span></div>
+              <div><span className="k">Vencimento</span><span className="v" style={{ color: atrasada ? 'var(--danger)' : undefined }}>{fmtDate(c.data_vencimento)}</span></div>
               <div><span className="k">Valor</span><span className="v mono">{fmtBRL(c.valor)}</span></div>
             </div>
-            <button className={`status-btn ${c.status}`} onClick={() => onToggle(c)}>
+            <button className={`status-btn ${c.status}`} onClick={() => c.status === 'pendente' ? setBaixaAlvo(c) : setReverterAlvo(c)}>
               {c.status === 'pago' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
-              {c.status === 'pago' ? `Pago em ${fmtDate(c.data_pagamento)}` : atrasada ? 'Pendente · atrasada' : 'Pendente'}
+              {c.status === 'pago' ? `Baixa em ${fmtDate(c.data_pagamento)}` : atrasada ? 'Dar baixa · atrasada' : 'Dar baixa'}
             </button>
           </div>
         );
       })}
       <style jsx>{`
         .status-btn { margin-top:10px; display:inline-flex; align-items:center; gap:6px; border:none; border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; }
-        .status-btn.pendente { background:rgba(232,163,61,0.15); color:#E8A33D; }
-        .status-btn.pago { background:rgba(79,209,174,0.15); color:#4FD1AE; }
+        .status-btn.pendente { background:var(--warning-soft-15); color:var(--warning); }
+        .status-btn.pago { background:var(--success-soft-15); color:var(--success); }
       `}</style>
       <ViewStyle />
+
+      {baixaAlvo && (
+        <DarBaixaModal
+          conta={baixaAlvo}
+          onClose={() => setBaixaAlvo(null)}
+          onConfirm={(data) => { onDarBaixa(baixaAlvo, data); setBaixaAlvo(null); }}
+        />
+      )}
+      {reverterAlvo && (
+        <Modal title="Reverter baixa" onClose={() => setReverterAlvo(null)}>
+          <p style={{ color: 'var(--text-muted)', fontSize: 14, margin: 0 }}>
+            Isso volta <strong style={{ color: 'var(--text)' }}>{reverterAlvo.descricao}</strong> para o status "pendente" e remove a data de baixa. Deseja continuar?
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <GhostButton full onClick={() => setReverterAlvo(null)}>Cancelar</GhostButton>
+            <PrimaryButton full onClick={() => { onReverterBaixa(reverterAlvo); setReverterAlvo(null); }}>Reverter</PrimaryButton>
+          </div>
+        </Modal>
+      )}
     </div>
+  );
+}
+
+function DarBaixaModal({ conta, onClose, onConfirm }) {
+  const [data, setData] = useState(todayISO());
+  return (
+    <Modal title="Dar baixa na conta" onClose={onClose}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 14, margin: 0 }}>
+        Confirmar pagamento de <strong style={{ color: 'var(--text)' }}>{conta.descricao}</strong> · <span className="mono">{fmtBRL(conta.valor)}</span>
+      </p>
+      <Field label="Data do pagamento">
+        <input className="input" type="date" value={data} onChange={(e) => setData(e.target.value)} />
+      </Field>
+      <PrimaryButton full onClick={() => onConfirm(data)}>Confirmar baixa</PrimaryButton>
+      <style jsx>{inputCss}</style>
+    </Modal>
   );
 }
 
 // ---------- Empréstimos ----------
 
-function EmprestimosView({ data, onEdit, onDelete, onToggleParcela }) {
+function EmprestimosView({ data, onEdit, onDelete, onToggleParcela, onGoReport }) {
   const [expandedId, setExpandedId] = useState(null);
+  const [filtroTipo, setFiltroTipo] = useState('todos'); // todos | banco | empresa
   if (!data.emprestimos.length) return <EmptyState icon={HandCoins} text="Nenhum empréstimo cadastrado. Toque em + para adicionar." />;
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const lista = data.emprestimos.filter((e) => filtroTipo === 'todos' || e.tipo === filtroTipo);
   return (
     <div className="view">
-      {data.emprestimos.map((e) => {
+      <div className="seg-filter">
+        <button className={filtroTipo === 'todos' ? 'active' : ''} onClick={() => setFiltroTipo('todos')}>Todos</button>
+        <button className={filtroTipo === 'banco' ? 'active' : ''} onClick={() => setFiltroTipo('banco')}>Bancários</button>
+        <button className={filtroTipo === 'empresa' ? 'active' : ''} onClick={() => setFiltroTipo('empresa')}>Entre empresas</button>
+      </div>
+      {lista.length === 0 ? <EmptyState icon={HandCoins} text="Nenhum empréstimo nessa categoria." /> : lista.map((e) => {
         const parcelas = e.parcelas || [];
         const pagas = parcelas.filter((p) => p.status === 'pago').length;
         const expanded = expandedId === e.id;
+        const isBanco = (e.tipo || 'banco') === 'banco';
         return (
           <div key={e.id} className="card">
             <div className="card-head">
-              <div className="card-title"><HandCoins size={16} /> {e.credor}</div>
+              <div className="card-title">
+                <HandCoins size={16} /> {isBanco ? e.credor : `${empresaNome(e.empresa_credora_id)} → ${empresaNome(e.empresa_id)}`}
+                <span className={`badge ${isBanco ? '' : 'badge-alt'}`}>{isBanco ? 'Bancário' : 'Intercompany'}</span>
+              </div>
               <div className="card-actions">
-                <button className="icon-btn" onClick={() => onEdit({ id: e.id, empresaId: e.empresa_id, credor: e.credor, valorTotal: e.valor_total, valorParcela: e.valor_parcela, numParcelas: e.num_parcelas, dataInicio: e.data_inicio, parcelas: e.parcelas })}><Pencil size={16} /></button>
-                <button className="icon-btn danger" onClick={() => onDelete(e.id, e.credor)}><Trash2 size={16} /></button>
+                <button className="icon-btn" onClick={() => onEdit({ id: e.id, empresaId: e.empresa_id, credor: e.credor, valorTotal: e.valor_total, valorParcela: e.valor_parcela, numParcelas: e.num_parcelas, dataInicio: e.data_inicio, parcelas: e.parcelas, tipo: e.tipo || 'banco', linhaCredito: e.linha_credito, empresaCredoraId: e.empresa_credora_id, temCarencia: e.tem_carencia, prazoCarencia: e.prazo_carencia })}><Pencil size={16} /></button>
+                <button className="icon-btn danger" onClick={() => onDelete(e.id, isBanco ? e.credor : `Intercompany ${empresaNome(e.empresa_id)}`)}><Trash2 size={16} /></button>
               </div>
             </div>
             <div className="card-grid">
-              <div><span className="k">Empresa</span><span className="v">{empresaNome(e.empresa_id)}</span></div>
+              <div><span className="k">{isBanco ? 'Empresa devedora' : 'Empresa devedora'}</span><span className="v">{empresaNome(e.empresa_id)}</span></div>
+              {isBanco ? (
+                <div><span className="k">Linha de crédito</span><span className="v">{e.linha_credito || '—'}</span></div>
+              ) : (
+                <div><span className="k">Empresa credora</span><span className="v">{empresaNome(e.empresa_credora_id)}</span></div>
+              )}
               <div><span className="k">Valor total</span><span className="v mono">{fmtBRL(e.valor_total)}</span></div>
               <div><span className="k">Parcela</span><span className="v mono">{fmtBRL(e.valor_parcela)}</span></div>
               <div><span className="k">Parcelas pagas</span><span className="v">{pagas} / {parcelas.length}</span></div>
               <div><span className="k">Início</span><span className="v">{fmtDate(e.data_inicio)}</span></div>
+              <div><span className="k">Carência</span><span className="v">{e.tem_carencia ? `${e.prazo_carencia} ${e.prazo_carencia === 1 ? 'mês' : 'meses'}` : 'Sem carência'}</span></div>
             </div>
             {parcelas.length > 0 && (
               <button className="expand-btn" onClick={() => setExpandedId(expanded ? null : e.id)}>
@@ -576,9 +1230,9 @@ function EmprestimosView({ data, onEdit, onDelete, onToggleParcela }) {
                   return (
                     <button key={p.id} className={`parcela-row ${p.status}`} onClick={() => onToggleParcela(p)}>
                       <span className="parcela-num">{p.numero}ª</span>
-                      <span className="parcela-date" style={{ color: atrasada ? '#E2596B' : undefined }}>{p.status === 'pago' ? `Pago ${fmtDate(p.data_pagamento)}` : fmtDate(p.data_vencimento)}</span>
+                      <span className="parcela-date" style={{ color: atrasada ? 'var(--danger)' : undefined }}>{p.status === 'pago' ? `Pago ${fmtDate(p.data_pagamento)}` : fmtDate(p.data_vencimento)}</span>
                       <span className="parcela-valor mono">{fmtBRL(p.valor)}</span>
-                      {p.status === 'pago' ? <CheckCircle2 size={15} color="#4FD1AE" /> : <AlertCircle size={15} color={atrasada ? '#E2596B' : '#E8A33D'} />}
+                      {p.status === 'pago' ? <CheckCircle2 size={15} color="var(--success)" /> : <AlertCircle size={15} color={atrasada ? '#B3413E' : '#B8860B'} />}
                     </button>
                   );
                 })}
@@ -587,17 +1241,859 @@ function EmprestimosView({ data, onEdit, onDelete, onToggleParcela }) {
           </div>
         );
       })}
+
+      <div className="reports-links">
+        <button className="reports-link" onClick={() => onGoReport('emprestimos-empresa')}><FileBarChart size={16} /> Relatório: empréstimos por empresa <ChevronRight size={15} /></button>
+        <button className="reports-link" onClick={() => onGoReport('parcelas-emprestimo')}><FileBarChart size={16} /> Relatório: parcelas de empréstimos <ChevronRight size={15} /></button>
+      </div>
+
       <style jsx>{`
-        .expand-btn { margin-top:10px; display:inline-flex; align-items:center; gap:6px; background:none; border:1px solid #2A3140; border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; color:#8891A0; cursor:pointer; }
+        .expand-btn { margin-top:10px; display:inline-flex; align-items:center; gap:6px; background:none; border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; color:var(--text-muted); cursor:pointer; }
         .parcelas-list { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
-        .parcela-row { display:flex; align-items:center; gap:10px; background:#12161D; border:1px solid #232A38; border-radius:9px; padding:9px 10px; font-size:12.5px; color:#E8EAED; cursor:pointer; width:100%; text-align:left; }
-        .parcela-num { color:#5A6272; width:26px; flex-shrink:0; }
+        .parcela-row { display:flex; align-items:center; gap:10px; background:var(--surface-alt); border:1px solid var(--border-strong); border-radius:9px; padding:9px 10px; font-size:12.5px; color:var(--text); cursor:pointer; width:100%; text-align:left; }
+        .parcela-num { color:var(--text-dim); width:26px; flex-shrink:0; }
         .parcela-date { flex:1; }
-        .parcela-valor { color:#B7BEC9; }
+        .parcela-valor { color:var(--text-muted); }
         .parcela-row.pago { opacity:0.65; }
+        .seg-filter { display:flex; gap:6px; margin-bottom:4px; }
+        .seg-filter button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .badge-alt { background:var(--accent-soft-10); border-color:var(--accent); color:var(--accent); }
+        .reports-links { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+        .reports-link { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--surface); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13px; padding:13px; border-radius:10px; cursor:pointer; }
       `}</style>
       <ViewStyle />
     </div>
+  );
+}
+
+// ---------- Seguros ----------
+
+function diasParaVencimento(iso) { return daysUntil(iso); }
+
+function statusSeguro(vigenciaFim) {
+  const dias = daysUntil(vigenciaFim);
+  if (dias < 0) return 'vencido';
+  if (dias <= 30) return 'vencendo';
+  return 'vigente';
+}
+
+function SeguroStatusBadge({ vigenciaFim }) {
+  const status = statusSeguro(vigenciaFim);
+  const dias = daysUntil(vigenciaFim);
+  const label = status === 'vencido' ? `Vencido há ${Math.abs(dias)}d` : status === 'vencendo' ? `Vence em ${dias}d` : 'Vigente';
+  return (
+    <span className={`seguro-badge ${status}`}>
+      {status === 'vigente' ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />} {label}
+      <style jsx>{`
+        .seguro-badge { display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; padding:4px 9px; border-radius:7px; }
+        .seguro-badge.vigente { background:var(--success-soft-15); color:var(--success); }
+        .seguro-badge.vencendo { background:var(--warning-soft-15); color:var(--warning); }
+        .seguro-badge.vencido { background:var(--danger-soft-12); color:var(--danger); }
+      `}</style>
+    </span>
+  );
+}
+
+function SegurosView({ data, onEdit, onDelete, onGoReport }) {
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const formaLabel = (v) => FORMAS_PAGAMENTO_SEGURO.find((f) => f.value === v)?.label || v;
+  const lista = [...(data.seguros || [])].sort((a, b) => a.vigencia_fim.localeCompare(b.vigencia_fim));
+
+  if (!lista.length) return <EmptyState icon={Shield} text="Nenhum seguro cadastrado. Toque em + para adicionar." />;
+
+  return (
+    <div className="view">
+      {lista.map((s) => (
+        <div key={s.id} className="card">
+          <div className="card-head">
+            <div className="card-title"><Shield size={16} /> {s.objeto}</div>
+            <div className="card-actions">
+              <button className="icon-btn" onClick={() => onEdit({
+                id: s.id, empresaId: s.empresa_id, objeto: s.objeto, vigenciaInicio: s.vigencia_inicio, vigenciaFim: s.vigencia_fim,
+                principalCondutor: s.principal_condutor, seguradora: s.seguradora, formaPagamento: s.forma_pagamento,
+                numParcelas: s.num_parcelas, valorParcela: s.valor_parcela, valorTotal: s.valor_total,
+              })}><Pencil size={16} /></button>
+              <button className="icon-btn danger" onClick={() => onDelete(s.id, s.objeto)}><Trash2 size={16} /></button>
+            </div>
+          </div>
+          <div className="card-grid">
+            <div><span className="k">Empresa</span><span className="v">{empresaNome(s.empresa_id)}</span></div>
+            <div><span className="k">Seguradora</span><span className="v">{s.seguradora}</span></div>
+            <div><span className="k">Vigência</span><span className="v">{fmtDate(s.vigencia_inicio)} – {fmtDate(s.vigencia_fim)}</span></div>
+            <div><span className="k">Principal condutor</span><span className="v">{s.principal_condutor || '—'}</span></div>
+            <div><span className="k">Pagamento</span><span className="v">{formaLabel(s.forma_pagamento)}</span></div>
+            <div><span className="k">Parcelas</span><span className="v">{s.num_parcelas ? `${s.num_parcelas}x de ${fmtBRL(s.valor_parcela)}` : '—'}</span></div>
+            <div><span className="k">Valor total</span><span className="v mono">{fmtBRL(s.valor_total)}</span></div>
+          </div>
+          <div style={{ marginTop: 10 }}><SeguroStatusBadge vigenciaFim={s.vigencia_fim} /></div>
+        </div>
+      ))}
+
+      <button className="reports-link" onClick={onGoReport}><FileBarChart size={16} /> Relatório de seguros <ChevronRight size={15} /></button>
+
+      <style jsx>{`
+        .reports-link { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--surface); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13px; padding:13px; border-radius:10px; cursor:pointer; margin-top:4px; }
+      `}</style>
+      <ViewStyle />
+    </div>
+  );
+}
+
+function SeguroForm({ item, empresas, onClose, onSave }) {
+  const [empresaId, setEmpresaId] = useState(item?.empresaId || empresas[0]?.id || '');
+  const [objeto, setObjeto] = useState(item?.objeto || '');
+  const [seguradora, setSeguradora] = useState(item?.seguradora || '');
+  const [principalCondutor, setPrincipalCondutor] = useState(item?.principalCondutor || '');
+  const [vigenciaInicio, setVigenciaInicio] = useState(item?.vigenciaInicio || todayISO());
+  const [vigenciaFim, setVigenciaFim] = useState(item?.vigenciaFim || todayISO());
+  const [formaPagamento, setFormaPagamento] = useState(item?.formaPagamento || 'boleto');
+  const [numParcelas, setNumParcelas] = useState(item?.numParcelas ?? '');
+  const [valorParcela, setValorParcela] = useState(item?.valorParcela ?? '');
+  const [valorTotal, setValorTotal] = useState(item?.valorTotal ?? '');
+
+  const canSave = empresaId && objeto.trim() && seguradora.trim() && vigenciaInicio && vigenciaFim && valorTotal;
+
+  return (
+    <Modal title={item ? 'Editar seguro' : 'Novo seguro'} onClose={onClose}>
+      {empresas.length === 0 ? <p className="muted2">Cadastre uma empresa antes.</p> : (
+        <>
+          <Field label="Empresa"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
+          <Field label="Objeto do seguro"><input className="input" value={objeto} onChange={(e) => setObjeto(e.target.value)} placeholder="Ex: Veículo Fusca ABC-1234, Prédio sede..." /></Field>
+          <Field label="Seguradora"><input className="input" value={seguradora} onChange={(e) => setSeguradora(e.target.value)} placeholder="Ex: Porto Seguro, Bradesco Seguros..." /></Field>
+          <Field label="Principal condutor (opcional)"><input className="input" value={principalCondutor} onChange={(e) => setPrincipalCondutor(e.target.value)} placeholder="Nome do condutor" /></Field>
+          <Field label="Início da vigência"><input className="input" type="date" value={vigenciaInicio} onChange={(e) => setVigenciaInicio(e.target.value)} /></Field>
+          <Field label="Fim da vigência"><input className="input" type="date" value={vigenciaFim} onChange={(e) => setVigenciaFim(e.target.value)} /></Field>
+          <Field label="Forma de pagamento">
+            <div className="tipo-toggle">
+              {FORMAS_PAGAMENTO_SEGURO.map((f) => (
+                <button type="button" key={f.value} className={formaPagamento === f.value ? 'active' : ''} onClick={() => setFormaPagamento(f.value)}>{f.label}</button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Quantidade de parcelas"><input className="input" type="number" value={numParcelas} onChange={(e) => setNumParcelas(e.target.value)} placeholder="Ex: 12" /></Field>
+          <Field label="Valor da parcela (R$)"><DecimalMaskInput value={valorParcela} onChange={setValorParcela} /></Field>
+          <Field label="Valor total do seguro (R$)"><DecimalMaskInput value={valorTotal} onChange={setValorTotal} /></Field>
+          <PrimaryButton full onClick={() => canSave && onSave({
+            id: item?.id, empresaId, objeto: objeto.trim(), seguradora: seguradora.trim(), principalCondutor: principalCondutor.trim(),
+            vigenciaInicio, vigenciaFim, formaPagamento, numParcelas: parseInt(numParcelas, 10) || null,
+            valorParcela: parseFloat(valorParcela) || null, valorTotal: parseFloat(valorTotal) || 0,
+          })}>{item ? 'Salvar alterações' : 'Salvar seguro'}</PrimaryButton>
+        </>
+      )}
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </Modal>
+  );
+}
+
+// ---------- Agenda (compromissos e obrigações) ----------
+
+function tipoLabel(v) { return TIPOS_COMPROMISSO.find((t) => t.value === v)?.label || v; }
+function alertaLabel(v) { return OPCOES_ALERTA.find((o) => o.value === v)?.label || `${v} min antes`; }
+
+function AgendaView({ data, onNovo, onEdit, onDelete, onConcluir, onReabrir, onProximoPasso }) {
+  const [filtro, setFiltro] = useState('pendentes'); // pendentes | hoje | concluidos | todos
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || null;
+
+  const lista = useMemo(() => {
+    const todos = [...(data.compromissos || [])];
+    const hojeStr = todayISO();
+    const filtrados = todos.filter((c) => {
+      if (filtro === 'pendentes') return c.status === 'pendente';
+      if (filtro === 'concluidos') return c.status === 'concluido';
+      if (filtro === 'hoje') return c.status === 'pendente' && new Date(c.data_hora).toISOString().slice(0, 10) === hojeStr;
+      return true;
+    });
+    return filtrados.sort((a, b) => filtro === 'concluidos'
+      ? (b.concluido_em || '').localeCompare(a.concluido_em || '')
+      : a.data_hora.localeCompare(b.data_hora));
+  }, [data.compromissos, filtro]);
+
+  const pendentes = (data.compromissos || []).filter((c) => c.status === 'pendente');
+  const atrasados = pendentes.filter((c) => new Date(c.data_hora) < new Date()).length;
+
+  return (
+    <div className="view">
+      <div className="seg-filter">
+        <button className={filtro === 'pendentes' ? 'active' : ''} onClick={() => setFiltro('pendentes')}>Pendentes</button>
+        <button className={filtro === 'hoje' ? 'active' : ''} onClick={() => setFiltro('hoje')}>Hoje</button>
+        <button className={filtro === 'concluidos' ? 'active' : ''} onClick={() => setFiltro('concluidos')}>Concluídos</button>
+        <button className={filtro === 'todos' ? 'active' : ''} onClick={() => setFiltro('todos')}>Todos</button>
+      </div>
+
+      {atrasados > 0 && filtro !== 'concluidos' && (
+        <div className="alerta-atrasados"><AlertCircle size={15} /> {atrasados} {atrasados === 1 ? 'ação atrasada' : 'ações atrasadas'}</div>
+      )}
+
+      {lista.length === 0 ? (
+        <EmptyState icon={CalendarDays} text={filtro === 'concluidos' ? 'Nenhuma ação concluída ainda.' : 'Nenhuma ação na agenda. Toque em + para adicionar.'} />
+      ) : lista.map((c) => {
+        const atrasado = c.status === 'pendente' && new Date(c.data_hora) < new Date();
+        const anterior = c.anterior_id ? (data.compromissos || []).find((x) => x.id === c.anterior_id) : null;
+        return (
+          <div key={c.id} className={`card ${c.status === 'concluido' ? 'concluido' : ''}`}>
+            <div className="card-head">
+              <div className="card-title">
+                {c.tipo === 'obrigacao' ? <Shield size={16} /> : <CalendarDays size={16} />} {c.titulo}
+                <span className={`badge ${c.tipo === 'obrigacao' ? 'badge-alt' : ''}`}>{tipoLabel(c.tipo)}</span>
+              </div>
+              <div className="card-actions">
+                <button className="icon-btn" onClick={() => onEdit({
+                  id: c.id, empresaId: c.empresa_id, titulo: c.titulo, descricao: c.descricao, tipo: c.tipo,
+                  dataHora: c.data_hora, alertaMinutos: c.alerta_minutos, proximoPasso: c.proximo_passo, anteriorId: c.anterior_id,
+                })}><Pencil size={16} /></button>
+                <button className="icon-btn danger" onClick={() => onDelete(c.id, c.titulo)}><Trash2 size={16} /></button>
+              </div>
+            </div>
+
+            {anterior && (
+              <div className="continuidade"><ArrowRight size={12} /> continuação de: {anterior.titulo}</div>
+            )}
+
+            <div className="card-grid">
+              <div><span className="k">Quando</span><span className="v" style={{ color: atrasado ? 'var(--danger)' : undefined }}>{fmtDataHora(c.data_hora)}</span></div>
+              <div><span className="k">Alerta</span><span className="v">{alertaLabel(c.alerta_minutos)}</span></div>
+              {empresaNome(c.empresa_id) && <div><span className="k">Empresa</span><span className="v">{empresaNome(c.empresa_id)}</span></div>}
+              {c.status === 'pendente' && <div><span className="k">Prazo</span><span className="v" style={{ color: atrasado ? 'var(--danger)' : 'var(--text-muted)' }}>{descreveQuando(c.data_hora)}</span></div>}
+            </div>
+
+            {c.descricao && <p className="descricao">{c.descricao}</p>}
+            {c.proximo_passo && (
+              <div className="proximo-passo"><span className="k">Próximo passo</span><span className="v">{c.proximo_passo}</span></div>
+            )}
+
+            <div className="acoes-row">
+              {c.status === 'pendente' ? (
+                <>
+                  <button className="acao-btn concluir" onClick={() => onConcluir(c)}><CheckCircle2 size={14} /> Concluir</button>
+                  <button className="acao-btn" onClick={() => onProximoPasso(c)}><ArrowRight size={14} /> Criar próximo passo</button>
+                </>
+              ) : (
+                <>
+                  <span className="concluido-tag"><CheckCircle2 size={14} /> Concluído em {fmtDataHora(c.concluido_em)}</span>
+                  <button className="acao-btn" onClick={() => onReabrir(c)}>Reabrir</button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      <style jsx>{`
+        .seg-filter { display:flex; gap:6px; margin-bottom:10px; }
+        .seg-filter button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:9px 6px; border-radius:8px; cursor:pointer; }
+        .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .alerta-atrasados { display:flex; align-items:center; gap:7px; background:var(--danger-soft-12); color:var(--danger); font-size:12.5px; font-weight:600; padding:10px 12px; border-radius:9px; margin-bottom:4px; }
+        .card.concluido { opacity:0.72; }
+        .continuidade { display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--accent); margin-bottom:8px; }
+        .descricao { margin:10px 0 0; font-size:13px; color:var(--text-muted); line-height:1.5; }
+        .proximo-passo { margin-top:10px; padding:9px 11px; background:var(--accent-soft-10); border-radius:8px; }
+        .acoes-row { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; align-items:center; }
+        .acao-btn { display:inline-flex; align-items:center; gap:5px; background:var(--surface-alt); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:7px 11px; border-radius:8px; cursor:pointer; }
+        .acao-btn.concluir { background:var(--success-soft-15); border-color:transparent; color:var(--success); }
+        .concluido-tag { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--success); font-weight:600; }
+      `}</style>
+      <ViewStyle />
+    </div>
+  );
+}
+
+function CompromissoForm({ item, empresas, onClose, onSave }) {
+  const [titulo, setTitulo] = useState(item?.titulo || '');
+  const [descricao, setDescricao] = useState(item?.descricao || '');
+  const [tipo, setTipo] = useState(item?.tipo || 'compromisso');
+  const [dataHora, setDataHora] = useState(toDatetimeLocal(item?.dataHora));
+  const [alertaMinutos, setAlertaMinutos] = useState(item?.alertaMinutos ?? 30);
+  const [empresaId, setEmpresaId] = useState(item?.empresaId || '');
+  const [proximoPasso, setProximoPasso] = useState(item?.proximoPasso || '');
+
+  const canSave = titulo.trim() && dataHora;
+
+  return (
+    <Modal title={item ? 'Editar ação' : 'Nova ação na agenda'} onClose={onClose}>
+      <Field label="Tipo">
+        <div className="tipo-toggle">
+          {TIPOS_COMPROMISSO.map((t) => (
+            <button type="button" key={t.value} className={tipo === t.value ? 'active' : ''} onClick={() => setTipo(t.value)}>{t.label}</button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Ação / título"><input className="input" value={titulo} onChange={(e) => setTitulo(e.target.value)} placeholder="Ex: Entregar DCTF, reunião com contador..." autoFocus /></Field>
+      <Field label="Data e hora"><input className="input" type="datetime-local" value={dataHora} onChange={(e) => setDataHora(e.target.value)} /></Field>
+      <Field label="Avisar com antecedência">
+        <select className="select" value={alertaMinutos} onChange={(e) => setAlertaMinutos(parseInt(e.target.value, 10))}>
+          {OPCOES_ALERTA.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </Field>
+      <Field label="Empresa (opcional)">
+        <select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
+          <option value="">Nenhuma / geral</option>
+          {empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+      </Field>
+      <Field label="Detalhes (opcional)">
+        <textarea className="input textarea" value={descricao} onChange={(e) => setDescricao(e.target.value)} rows={3} placeholder="Observações sobre essa ação..." />
+      </Field>
+      <Field label="Próximo passo previsto (opcional)">
+        <input className="input" value={proximoPasso} onChange={(e) => setProximoPasso(e.target.value)} placeholder="O que vem depois dessa ação" />
+      </Field>
+      <PrimaryButton full onClick={() => canSave && onSave({
+        id: item?.id, empresaId, titulo: titulo.trim(), descricao: descricao.trim(), tipo,
+        dataHora: new Date(dataHora).toISOString(), alertaMinutos,
+        proximoPasso: proximoPasso.trim(), anteriorId: item?.anteriorId,
+      })}>{item ? 'Salvar alterações' : 'Salvar ação'}</PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .textarea { resize:vertical; font-family:'Inter',sans-serif; }
+      `}</style>
+    </Modal>
+  );
+}
+
+// Modal para encadear a próxima ação a partir de uma ação existente
+function ProximoPassoForm({ anterior, onClose, onSave }) {
+  const [titulo, setTitulo] = useState(anterior?.proximo_passo || '');
+  const [dataHora, setDataHora] = useState(toDatetimeLocal());
+  const [alertaMinutos, setAlertaMinutos] = useState(30);
+  const [descricao, setDescricao] = useState('');
+  const canSave = titulo.trim() && dataHora;
+
+  return (
+    <Modal title="Próximo passo" onClose={onClose}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>
+        Continuação de: <strong style={{ color: 'var(--text)' }}>{anterior.titulo}</strong>
+      </p>
+      <Field label="Próxima ação"><input className="input" value={titulo} onChange={(e) => setTitulo(e.target.value)} placeholder="O que precisa ser feito em seguida" autoFocus /></Field>
+      <Field label="Data e hora"><input className="input" type="datetime-local" value={dataHora} onChange={(e) => setDataHora(e.target.value)} /></Field>
+      <Field label="Avisar com antecedência">
+        <select className="select" value={alertaMinutos} onChange={(e) => setAlertaMinutos(parseInt(e.target.value, 10))}>
+          {OPCOES_ALERTA.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </Field>
+      <Field label="Detalhes (opcional)">
+        <textarea className="input textarea" value={descricao} onChange={(e) => setDescricao(e.target.value)} rows={2} />
+      </Field>
+      <PrimaryButton full onClick={() => canSave && onSave({
+        titulo: titulo.trim(), dataHora: new Date(dataHora).toISOString(), alertaMinutos, descricao: descricao.trim(),
+      })}>Criar próximo passo</PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`.textarea { resize:vertical; font-family:'Inter',sans-serif; }`}</style>
+    </Modal>
+  );
+}
+
+// Popup que aparece na tela quando chega a hora de uma ação
+function AlertaPopup({ compromisso, onAdiar, onConcluir, onVerAgenda, onFechar }) {
+  const atrasado = new Date(compromisso.data_hora) < new Date();
+  return (
+    <div className="alerta-backdrop">
+      <div className="alerta-box">
+        <div className="alerta-head">
+          <div className="sino"><Bell size={20} /></div>
+          <div>
+            <div className="alerta-tipo">{tipoLabel(compromisso.tipo)}{atrasado ? ' · atrasado' : ''}</div>
+            <div className="alerta-titulo">{compromisso.titulo}</div>
+          </div>
+        </div>
+        <div className="alerta-quando"><Clock size={14} /> {fmtDataHora(compromisso.data_hora)}</div>
+        {compromisso.descricao && <p className="alerta-desc">{compromisso.descricao}</p>}
+        {compromisso.proximo_passo && (
+          <div className="alerta-proximo"><span className="rotulo">Próximo passo</span>{compromisso.proximo_passo}</div>
+        )}
+        <div className="alerta-botoes">
+          <GhostButton full onClick={onAdiar}>Lembrar em 10 min</GhostButton>
+          <PrimaryButton full onClick={onConcluir}>Concluir</PrimaryButton>
+        </div>
+        <button className="alerta-link" onClick={onVerAgenda}>Ver na agenda</button>
+        <button className="alerta-x" onClick={onFechar}><X size={18} /></button>
+      </div>
+      <style jsx>{`
+        .alerta-backdrop { position:fixed; inset:0; background:rgba(8,10,14,0.55); display:flex; align-items:center; justify-content:center; z-index:100; padding:16px; }
+        .alerta-box { position:relative; background:var(--surface); border:1px solid var(--border); border-radius:14px; width:100%; max-width:420px; padding:22px; box-shadow:0 16px 40px rgba(27,39,51,0.24); animation:pop .18s ease-out; }
+        @keyframes pop { from { transform:scale(0.96); opacity:0; } to { transform:scale(1); opacity:1; } }
+        .alerta-head { display:flex; align-items:flex-start; gap:12px; margin-bottom:14px; }
+        .sino { width:40px; height:40px; border-radius:10px; background:var(--warning-soft-15); color:var(--warning); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .alerta-tipo { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-dim); font-weight:600; }
+        .alerta-titulo { font-family:'Space Grotesk',sans-serif; font-size:17px; color:var(--text); font-weight:600; margin-top:2px; }
+        .alerta-quando { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-muted); margin-bottom:10px; }
+        .alerta-desc { font-size:13px; color:var(--text-muted); line-height:1.5; margin:0 0 10px; }
+        .alerta-proximo { background:var(--accent-soft-10); border-radius:8px; padding:10px 12px; font-size:13px; color:var(--text); margin-bottom:14px; }
+        .alerta-proximo .rotulo { display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; margin-bottom:3px; }
+        .alerta-botoes { display:flex; gap:10px; margin-top:16px; }
+        .alerta-link { display:block; width:100%; background:none; border:none; color:var(--accent); font-size:12.5px; font-weight:600; padding:12px 0 0; cursor:pointer; }
+        .alerta-x { position:absolute; top:14px; right:14px; background:none; border:none; color:var(--text-dim); cursor:pointer; padding:4px; display:flex; }
+      `}</style>
+    </div>
+  );
+}
+
+// ---------- Usuários (admin) ----------
+
+function UsuariosView({ usuarioAtualId, onGoRefresh }) {
+  const [usuarios, setUsuarios] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [modal, setModal] = useState(null); // { type: 'novo'|'editar'|'senha', item }
+  const [confirmExcluir, setConfirmExcluir] = useState(null);
+  const [processando, setProcessando] = useState(false);
+
+  const carregar = () => {
+    db.fetchPerfis().then(setUsuarios).catch((e) => setErro(e.message || 'Erro ao carregar usuários.'));
+  };
+  useEffect(() => { carregar(); }, []);
+
+  const executar = async (fn) => {
+    setProcessando(true);
+    try { await fn(); carregar(); setModal(null); setConfirmExcluir(null); }
+    catch (e) { alert(e.message || 'Erro na operação.'); }
+    setProcessando(false);
+  };
+
+  if (erro) return <EmptyState icon={Users} text={erro} />;
+  if (!usuarios) return <div className="view"><p className="muted2">Carregando usuários…</p></div>;
+
+  return (
+    <div className="view">
+      <button className="add-inline-btn" style={{ marginBottom: 12 }} onClick={() => setModal({ type: 'novo' })}><Plus size={15} /> Novo usuário</button>
+
+      {usuarios.map((u) => (
+        <div key={u.id} className="card">
+          <div className="card-head">
+            <div className="card-title">
+              <Users size={16} /> {u.nome}
+              <span className={`badge ${u.papel === 'admin' ? 'badge-alt' : ''}`}>{u.papel === 'admin' ? 'Administrador' : 'Usuário'}</span>
+            </div>
+            <div className="card-actions">
+              <button className="icon-btn" onClick={() => setModal({ type: 'editar', item: u })}><Pencil size={16} /></button>
+              <button className="icon-btn" onClick={() => setModal({ type: 'senha', item: u })}><KeyRound size={16} /></button>
+              {u.id !== usuarioAtualId && (
+                <button className="icon-btn danger" onClick={() => setConfirmExcluir(u)}><Trash2 size={16} /></button>
+              )}
+            </div>
+          </div>
+          <div className="card-grid">
+            <div><span className="k">E-mail</span><span className="v">{u.email}</span></div>
+            <div><span className="k">Abas liberadas</span><span className="v">{u.papel === 'admin' ? 'Todas' : (u.abas?.length ? u.abas.map((a) => ABAS_SISTEMA.find((x) => x.key === a)?.label || a).join(', ') : 'Nenhuma')}</span></div>
+          </div>
+        </div>
+      ))}
+
+      {modal?.type === 'novo' && <UsuarioNovoForm onClose={() => setModal(null)} onSave={(v) => executar(() => db.criarUsuario(v))} processando={processando} />}
+      {modal?.type === 'editar' && <UsuarioEditarForm item={modal.item} onClose={() => setModal(null)} onSave={(v) => executar(() => db.updatePerfil(v))} processando={processando} />}
+      {modal?.type === 'senha' && <UsuarioSenhaForm item={modal.item} onClose={() => setModal(null)} onSave={(novaSenha) => executar(() => db.redefinirSenha(modal.item.id, novaSenha))} processando={processando} />}
+
+      {confirmExcluir && (
+        <Modal title="Excluir usuário" onClose={() => setConfirmExcluir(null)}>
+          <p style={{ color: 'var(--text-muted)', fontSize: 14, margin: 0 }}>
+            Tem certeza que deseja excluir o acesso de <strong style={{ color: 'var(--text)' }}>{confirmExcluir.nome}</strong>? Essa ação não pode ser desfeita.
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <GhostButton full onClick={() => setConfirmExcluir(null)}>Cancelar</GhostButton>
+            <PrimaryButton full tone="danger" onClick={() => executar(() => db.excluirUsuario(confirmExcluir.id))}>Excluir</PrimaryButton>
+          </div>
+        </Modal>
+      )}
+      <ViewStyle />
+    </div>
+  );
+}
+
+function AbasChecklist({ abas, onChange }) {
+  const toggle = (key) => onChange(abas.includes(key) ? abas.filter((a) => a !== key) : [...abas, key]);
+  return (
+    <div className="abas-checklist">
+      {ABAS_SISTEMA.map((a) => (
+        <button type="button" key={a.key} className={abas.includes(a.key) ? 'on' : ''} onClick={() => toggle(a.key)}>{a.label}</button>
+      ))}
+      <style jsx>{`
+        .abas-checklist { display:flex; flex-wrap:wrap; gap:6px; }
+        .abas-checklist button { background:var(--surface); border:1px solid var(--border); color:var(--text-dim); font-size:12px; font-weight:600; padding:7px 10px; border-radius:20px; cursor:pointer; }
+        .abas-checklist button.on { background:var(--accent-soft-10); border-color:var(--accent); color:var(--accent); }
+      `}</style>
+    </div>
+  );
+}
+
+function UsuarioNovoForm({ onClose, onSave, processando }) {
+  const [nome, setNome] = useState('');
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [papel, setPapel] = useState('usuario');
+  const [abas, setAbas] = useState([]);
+  const canSave = nome.trim() && email.trim() && senha.length >= 6;
+
+  return (
+    <Modal title="Novo usuário" onClose={onClose}>
+      <Field label="Nome"><input className="input" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome completo" autoFocus /></Field>
+      <Field label="E-mail"><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@exemplo.com" /></Field>
+      <Field label="Senha provisória"><input className="input" type="text" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="Mínimo 6 caracteres" /></Field>
+      <Field label="Papel">
+        <div className="tipo-toggle">
+          <button type="button" className={papel === 'usuario' ? 'active' : ''} onClick={() => setPapel('usuario')}>Usuário comum</button>
+          <button type="button" className={papel === 'admin' ? 'active' : ''} onClick={() => setPapel('admin')}>Administrador</button>
+        </div>
+      </Field>
+      {papel === 'usuario' && (
+        <Field label="Abas liberadas"><AbasChecklist abas={abas} onChange={setAbas} /></Field>
+      )}
+      {papel === 'admin' && <p className="muted2">Administradores enxergam todas as abas automaticamente.</p>}
+      <PrimaryButton full onClick={() => canSave && onSave({ nome: nome.trim(), email: email.trim(), senha, papel, abas })}>
+        {processando ? 'Criando…' : 'Criar usuário'}
+      </PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </Modal>
+  );
+}
+
+function UsuarioEditarForm({ item, onClose, onSave, processando }) {
+  const [nome, setNome] = useState(item.nome);
+  const [papel, setPapel] = useState(item.papel);
+  const [abas, setAbas] = useState(item.abas || []);
+
+  return (
+    <Modal title={`Editar ${item.nome}`} onClose={onClose}>
+      <Field label="Nome"><input className="input" value={nome} onChange={(e) => setNome(e.target.value)} /></Field>
+      <Field label="Papel">
+        <div className="tipo-toggle">
+          <button type="button" className={papel === 'usuario' ? 'active' : ''} onClick={() => setPapel('usuario')}>Usuário comum</button>
+          <button type="button" className={papel === 'admin' ? 'active' : ''} onClick={() => setPapel('admin')}>Administrador</button>
+        </div>
+      </Field>
+      {papel === 'usuario' && (
+        <Field label="Abas liberadas"><AbasChecklist abas={abas} onChange={setAbas} /></Field>
+      )}
+      {papel === 'admin' && <p className="muted2">Administradores enxergam todas as abas automaticamente.</p>}
+      <PrimaryButton full onClick={() => onSave({ id: item.id, nome: nome.trim(), papel, abas })}>
+        {processando ? 'Salvando…' : 'Salvar alterações'}
+      </PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+      `}</style>
+    </Modal>
+  );
+}
+
+function UsuarioSenhaForm({ item, onClose, onSave, processando }) {
+  const [senha, setSenha] = useState('');
+  return (
+    <Modal title={`Redefinir senha · ${item.nome}`} onClose={onClose}>
+      <Field label="Nova senha provisória"><input className="input" type="text" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="Mínimo 6 caracteres" autoFocus /></Field>
+      <PrimaryButton full onClick={() => senha.length >= 6 && onSave(senha)}>{processando ? 'Salvando…' : 'Redefinir senha'}</PrimaryButton>
+      <style jsx>{inputCss}</style>
+    </Modal>
+  );
+}
+
+// ---------- Vendas ----------
+
+function setorLabel(v) { return SETORES_VENDA.find((s) => s.value === v)?.label || v; }
+
+function VendasView({ data, onSaveMes, onGoReport }) {
+  const [subTela, setSubTela] = useState('lancamentos'); // lancamentos | comparativo
+  const [empresaId, setEmpresaId] = useState(data.empresas[0]?.id || '');
+  const [setor, setSetor] = useState(SETORES_VENDA[0].value);
+  const [ano, setAno] = useState(new Date().getFullYear());
+  const [editMes, setEditMes] = useState(null); // número do mês (1-12) sendo editado
+
+  if (!data.empresas.length) return <EmptyState icon={ShoppingCart} text="Cadastre uma empresa antes de lançar vendas." />;
+
+  if (subTela === 'comparativo') {
+    return <VendasComparativo data={data} onVoltar={() => setSubTela('lancamentos')} />;
+  }
+
+  const registros = (data.vendas || []).filter((v) => v.empresa_id === empresaId && v.setor === setor && v.ano === ano);
+  const porMes = (mes) => registros.find((v) => v.mes === mes);
+  const totalAno = registros.reduce((s, v) => s + (Number(v.valor) || 0), 0);
+
+  const chartData = MESES.map((nome, i) => ({ name: nome.slice(0, 3), valor: Number(porMes(i + 1)?.valor) || 0 }));
+
+  return (
+    <div className="view">
+      <div className="sub-tabs">
+        <button className="active">Lançamentos</button>
+        <button onClick={() => setSubTela('comparativo')}>Comparativo</button>
+      </div>
+
+      <div className="vendas-filtros">
+        <select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
+          {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+        <select className="select" value={ano} onChange={(e) => setAno(parseInt(e.target.value, 10))}>
+          {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
+
+      <div className="seg-filter setor-filter">
+        {SETORES_VENDA.map((s) => (
+          <button key={s.value} className={setor === s.value ? 'active' : ''} onClick={() => setSetor(s.value)}>{s.label}</button>
+        ))}
+      </div>
+
+      <div className="stat-card total-ano">
+        <div className="stat-label">Total de {setorLabel(setor)} em {ano}</div>
+        <div className="stat-value">{fmtBRL(totalAno)}</div>
+      </div>
+
+      <div className="chart-box">
+        <ResponsiveContainer width="100%" height={160}>
+          <BarChart data={chartData} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="name" tick={{ fill: 'var(--text-dim)', fontSize: 10 }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fill: 'var(--text-dim)', fontSize: 10 }} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} width={34} />
+            <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: 'var(--text)' }} />
+            <Bar dataKey="valor" fill="var(--accent)" radius={[4, 4, 0, 0]} barSize={16} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <SectionTitle>Lançamentos mensais</SectionTitle>
+      <div className="meses-list">
+        {MESES.map((nome, i) => {
+          const mes = i + 1;
+          const reg = porMes(mes);
+          return (
+            <button key={mes} className="mes-row" onClick={() => setEditMes(mes)}>
+              <span className="mes-nome">{nome}</span>
+              <span className="mes-valor mono">{reg ? fmtBRL(reg.valor) : '—'}</span>
+              {reg?.observacoes && <span className="mes-obs-dot" title={reg.observacoes} />}
+              <Pencil size={14} color="var(--text-dim)" />
+            </button>
+          );
+        })}
+      </div>
+
+      <button className="reports-link" onClick={onGoReport}><FileBarChart size={16} /> Relatório de vendas <ChevronRight size={15} /></button>
+
+      {editMes && (
+        <VendaMesForm
+          empresaId={empresaId} setor={setor} ano={ano} mes={editMes}
+          registro={porMes(editMes)}
+          onClose={() => setEditMes(null)}
+          onSave={(v) => { onSaveMes(v); setEditMes(null); }}
+        />
+      )}
+
+      <style jsx>{`
+        .vendas-filtros { display:flex; gap:8px; margin-bottom:10px; }
+        .sub-tabs { display:flex; gap:6px; margin-bottom:12px; }
+        .sub-tabs button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer; }
+        .sub-tabs button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .seg-filter { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+        .seg-filter button { flex:1 1 30%; min-width:90px; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12px; font-weight:600; padding:9px 6px; border-radius:8px; cursor:pointer; }
+        .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .total-ano { margin-bottom:12px; }
+        .meses-list { display:flex; flex-direction:column; gap:8px; margin-bottom:8px; }
+        .mes-row { display:flex; align-items:center; gap:10px; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; cursor:pointer; text-align:left; box-shadow:0 1px 2px rgba(27,39,51,0.04); }
+        .mes-nome { flex:1; font-size:13.5px; color:var(--text); font-weight:500; }
+        .mes-valor { font-size:13.5px; color:var(--text-muted); }
+        .mes-obs-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); flex-shrink:0; }
+        .reports-link { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; background:var(--surface); border:1px solid var(--border); color:var(--accent); font-weight:600; font-size:13px; padding:13px; border-radius:10px; cursor:pointer; margin-top:8px; }
+      `}</style>
+      <style jsx>{inputCss}</style>
+      <ViewStyle />
+    </div>
+  );
+}
+
+const CORES_COMPARATIVO = ['#1F3A5F', '#2C7A57', '#B8860B', '#B3413E', '#5B6B7C', '#7B4F9D'];
+
+function VendasComparativo({ data, onVoltar }) {
+  const [modo, setModo] = useState('mes'); // mes (12 meses de um ano) | ano (evolução anual)
+  const [empresaId, setEmpresaId] = useState('todas');
+  const [ano, setAno] = useState(new Date().getFullYear());
+  const [anoDe, setAnoDe] = useState(Math.max(ANO_INICIAL_VENDAS, new Date().getFullYear() - 4));
+  const [anoAte, setAnoAte] = useState(new Date().getFullYear());
+  const [setoresSel, setSetoresSel] = useState(SETORES_VENDA.map((s) => s.value));
+
+  const toggleSetor = (v) => setSetoresSel((prev) => prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]);
+
+  const base = (data.vendas || []).filter((v) => empresaId === 'todas' || v.empresa_id === empresaId);
+
+  // Modo "mês a mês": eixo X = meses do ano escolhido, uma barra por setor
+  // Modo "ano a ano": eixo X = anos do intervalo, uma barra por setor
+  const chartData = useMemo(() => {
+    if (modo === 'mes') {
+      return MESES.map((nome, i) => {
+        const linha = { name: nome.slice(0, 3) };
+        setoresSel.forEach((s) => {
+          linha[s] = base
+            .filter((v) => v.ano === ano && v.mes === i + 1 && v.setor === s)
+            .reduce((acc, v) => acc + (Number(v.valor) || 0), 0);
+        });
+        return linha;
+      });
+    }
+    const anos = [];
+    for (let y = anoDe; y <= anoAte; y++) anos.push(y);
+    return anos.map((y) => {
+      const linha = { name: String(y) };
+      setoresSel.forEach((s) => {
+        linha[s] = base
+          .filter((v) => v.ano === y && v.setor === s)
+          .reduce((acc, v) => acc + (Number(v.valor) || 0), 0);
+      });
+      return linha;
+    });
+  }, [base, modo, ano, anoDe, anoAte, setoresSel]);
+
+  // Totais por setor no período selecionado, para a tabela comparativa
+  const totaisPorSetor = setoresSel.map((s) => ({
+    setor: s,
+    total: chartData.reduce((acc, linha) => acc + (Number(linha[s]) || 0), 0),
+  })).sort((a, b) => b.total - a.total);
+  const totalGeral = totaisPorSetor.reduce((s, x) => s + x.total, 0);
+
+  const exportar = (tipo) => {
+    const colunas = [
+      { header: modo === 'mes' ? 'Mês' : 'Ano', get: (l) => l.name, width: 14 },
+      ...setoresSel.map((s) => ({ header: setorLabel(s), get: (l) => Number(l[s]) || 0, width: 16, money: true })),
+    ];
+    const titulo = modo === 'mes'
+      ? `Comparativo de Vendas por Setor · ${ano}`
+      : `Comparativo de Vendas por Setor · ${anoDe}–${anoAte}`;
+    const grupos = [{ label: empresaId === 'todas' ? 'Todas as empresas' : (data.empresas.find((e) => e.id === empresaId)?.nome || ''), rows: chartData }];
+    if (tipo === 'excel') {
+      exportGroupedExcel({ groups: grupos, columns: colunas, valueColIndex: null, sheetName: 'Comparativo', fileName: 'comparativo-vendas', reportTitle: titulo });
+    } else {
+      exportToPDF({ title: titulo, groups: grupos, columns: colunas, valueColIndex: null, fileName: 'comparativo-vendas' });
+    }
+  };
+
+  return (
+    <div className="view">
+      <div className="sub-tabs">
+        <button onClick={onVoltar}>Lançamentos</button>
+        <button className="active">Comparativo</button>
+      </div>
+
+      <div className="seg-filter modo-filter">
+        <button className={modo === 'mes' ? 'active' : ''} onClick={() => setModo('mes')}>Mês a mês</button>
+        <button className={modo === 'ano' ? 'active' : ''} onClick={() => setModo('ano')}>Ano a ano</button>
+      </div>
+
+      <div className="vendas-filtros">
+        <select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
+          <option value="todas">Todas as empresas</option>
+          {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+        {modo === 'mes' ? (
+          <select className="select" value={ano} onChange={(e) => setAno(parseInt(e.target.value, 10))}>
+            {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
+        ) : (
+          <>
+            <select className="select" value={anoDe} onChange={(e) => setAnoDe(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().slice().reverse().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+            <select className="select" value={anoAte} onChange={(e) => setAnoAte(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </>
+        )}
+      </div>
+
+      <div className="setores-check">
+        {SETORES_VENDA.map((s, i) => (
+          <button key={s.value} className={setoresSel.includes(s.value) ? 'on' : ''} onClick={() => toggleSetor(s.value)}>
+            <span className="dot" style={{ background: setoresSel.includes(s.value) ? CORES_COMPARATIVO[i % CORES_COMPARATIVO.length] : 'var(--border-strong)' }} />
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {setoresSel.length === 0 ? (
+        <EmptyState icon={ShoppingCart} text="Selecione ao menos um setor para comparar." />
+      ) : (
+        <>
+          <div className="chart-box">
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="name" tick={{ fill: 'var(--text-dim)', fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: 'var(--text-dim)', fontSize: 10 }} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} width={38} />
+                <Tooltip formatter={(v, nome) => [fmtBRL(v), setorLabel(nome)]} contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: 'var(--text)' }} />
+                {setoresSel.map((s, i) => (
+                  <Bar key={s} dataKey={s} fill={CORES_COMPARATIVO[SETORES_VENDA.findIndex((x) => x.value === s) % CORES_COMPARATIVO.length]} radius={[3, 3, 0, 0]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <SectionTitle>Totais do período</SectionTitle>
+          <table className="rtable comparativo-table">
+            <thead><tr><th>Setor</th><th className="right">Total</th><th className="right">% do total</th></tr></thead>
+            <tbody>
+              {totaisPorSetor.map((t) => (
+                <tr key={t.setor}>
+                  <td>
+                    <span className="dot" style={{ background: CORES_COMPARATIVO[SETORES_VENDA.findIndex((x) => x.value === t.setor) % CORES_COMPARATIVO.length] }} />
+                    {setorLabel(t.setor)}
+                  </td>
+                  <td className="right mono">{fmtBRL(t.total)}</td>
+                  <td className="right dim">{totalGeral > 0 ? `${((t.total / totalGeral) * 100).toFixed(1)}%` : '—'}</td>
+                </tr>
+              ))}
+              <tr className="subtotal-row"><td>Total geral</td><td className="right mono">{fmtBRL(totalGeral)}</td><td className="right">100%</td></tr>
+            </tbody>
+          </table>
+
+          <div className="comparativo-export">
+            <ExportButton onClick={() => exportar('excel')} label="Excel" />
+            <ExportButton onClick={() => exportar('pdf')} label="PDF" />
+          </div>
+        </>
+      )}
+
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .sub-tabs { display:flex; gap:6px; margin-bottom:12px; }
+        .sub-tabs button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer; }
+        .sub-tabs button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .seg-filter { display:flex; gap:6px; margin-bottom:10px; }
+        .seg-filter button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .seg-filter button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .vendas-filtros { display:flex; gap:8px; margin-bottom:10px; }
+        .setores-check { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+        .setores-check button { display:inline-flex; align-items:center; gap:6px; background:var(--surface); border:1px solid var(--border); color:var(--text-dim); font-size:12px; font-weight:600; padding:7px 10px; border-radius:20px; cursor:pointer; }
+        .setores-check button.on { color:var(--text); border-color:var(--border-strong); }
+        .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px; vertical-align:middle; }
+        .comparativo-table { width:100%; margin:0 0 14px; }
+        .comparativo-export { display:flex; gap:8px; }
+      `}</style>
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
+function VendaMesForm({ empresaId, setor, ano, mes, registro, onClose, onSave }) {
+  const [valor, setValor] = useState(registro?.valor ?? '');
+  const [observacoes, setObservacoes] = useState(registro?.observacoes || '');
+
+  return (
+    <Modal title={`${MESES[mes - 1]} de ${ano} · ${setorLabel(setor)}`} onClose={onClose}>
+      <Field label="Valor total do mês (R$)"><DecimalMaskInput value={valor} onChange={setValor} /></Field>
+      <Field label="Observações (opcional)">
+        <textarea className="input textarea" value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Alguma observação sobre este mês..." rows={3} />
+      </Field>
+      <PrimaryButton full onClick={() => onSave({ empresaId, setor, ano, mes, valor: parseFloat(valor) || 0, observacoes: observacoes.trim() })}>Salvar lançamento</PrimaryButton>
+      <style jsx>{inputCss}</style>
+      <style jsx>{`.textarea { resize:vertical; font-family:'Inter',sans-serif; }`}</style>
+    </Modal>
   );
 }
 
@@ -616,16 +2112,16 @@ function TaxasHome({ data, sub, setSub, onNewCartao, onEditCartao, onDeleteCarta
         <button key={key} className="report-option" onClick={() => setSub(key)}>
           <div className="report-icon"><Icon size={18} /></div>
           <div className="report-text"><div className="report-label">{label}</div><div className="report-desc">{desc}{count > 0 ? ` · ${count} cadastrada${count === 1 ? '' : 's'}` : ''}</div></div>
-          <ChevronRight size={18} color="#5A6272" />
+          <ChevronRight size={18} color="var(--text-dim)" />
         </button>
       ))}
       <style jsx>{`
         .reports-home { padding:16px 20px 24px; display:flex; flex-direction:column; gap:10px; }
-        .report-option { display:flex; align-items:center; gap:12px; background:#1C222C; border:1px solid #2A3140; border-radius:14px; padding:14px; cursor:pointer; text-align:left; }
-        .report-icon { width:38px; height:38px; border-radius:10px; background:rgba(79,209,174,0.12); color:#4FD1AE; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .report-option { display:flex; align-items:center; gap:12px; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; cursor:pointer; text-align:left; box-shadow:0 1px 2px rgba(27,39,51,0.04); }
+        .report-icon { width:38px; height:38px; border-radius:10px; background:var(--accent-soft-12); color:var(--accent); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
         .report-text { flex:1; }
-        .report-label { font-family:'Space Grotesk',sans-serif; font-size:14.5px; color:#E8EAED; font-weight:600; }
-        .report-desc { font-size:12px; color:#5A6272; margin-top:2px; }
+        .report-label { font-family:'Space Grotesk',sans-serif; font-size:14.5px; color:var(--text); font-weight:600; }
+        .report-desc { font-size:12px; color:var(--text-dim); margin-top:2px; }
       `}</style>
     </div>
   );
@@ -638,8 +2134,8 @@ function ReportHeader({ title, onBack }) {
       <h2>{title}</h2>
       <style jsx>{`
         .rh { display:flex; align-items:center; gap:10px; padding:16px 20px 4px; }
-        .back { background:none; border:none; color:#8891A0; cursor:pointer; padding:4px; display:flex; }
-        h2 { font-family:'Space Grotesk',sans-serif; font-size:17px; color:#E8EAED; font-weight:600; margin:0; }
+        .back { background:none; border:none; color:var(--text-muted); cursor:pointer; padding:4px; display:flex; }
+        h2 { font-family:'Space Grotesk',sans-serif; font-size:17px; color:var(--text); font-weight:600; margin:0; }
       `}</style>
     </div>
   );
@@ -657,10 +2153,10 @@ function CartoesView({ data, onEdit, onNew, onDelete, onBack }) {
   const doExport = () => exportToExcel(lista, [
     { header: 'Administradora', get: (t) => t.administradora, width: 22 },
     { header: 'Bandeira', get: (t) => t.bandeira, width: 16 },
-    { header: 'Pix', get: (t) => Number(t.taxa_pix) || 0, width: 10 },
-    { header: 'Débito', get: (t) => Number(t.taxa_debito) || 0, width: 10 },
-    { header: 'Crédito à vista', get: (t) => Number(t.taxa_credito_avista) || 0, width: 14 },
-    ...PARCELAS_RANGE.map((n) => ({ header: `${n}x`, get: (t) => Number(t.parcelas?.[n]) || 0, width: 8 })),
+    { header: 'Pix', get: (t) => fmtPct(t.taxa_pix), width: 10 },
+    { header: 'Débito', get: (t) => fmtPct(t.taxa_debito), width: 10 },
+    { header: 'Crédito à vista', get: (t) => fmtPct(t.taxa_credito_avista), width: 14 },
+    ...PARCELAS_RANGE.map((n) => ({ header: `${n}x`, get: (t) => fmtPct(t.parcelas?.[n]), width: 8 })),
   ], 'Taxas de Cartão', 'taxas-cartao');
 
   return (
@@ -719,11 +2215,11 @@ function CartoesView({ data, onEdit, onNew, onDelete, onBack }) {
             <div className="chart-box" style={{ margin: '0 20px' }}>
               <ResponsiveContainer width="100%" height={Math.max(120, comparativo.length * 40)}>
                 <BarChart data={comparativo} layout="vertical" margin={{ top: 4, right: 30, bottom: 4, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1E2430" horizontal={false} />
-                  <XAxis type="number" tick={{ fill: '#5A6272', fontSize: 10 }} tickFormatter={(v) => `${v}%`} axisLine={false} tickLine={false} />
-                  <YAxis type="category" dataKey="name" tick={{ fill: '#8891A0', fontSize: 11 }} axisLine={false} tickLine={false} width={90} />
-                  <Tooltip formatter={(v) => fmtPct(v)} contentStyle={{ background: '#1C222C', border: '1px solid #2A3140', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: '#E8EAED' }} />
-                  <Bar dataKey="valor" fill="#4FD1AE" radius={[0, 4, 4, 0]} barSize={16} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: 'var(--text-dim)', fontSize: 10 }} tickFormatter={(v) => `${v}%`} axisLine={false} tickLine={false} />
+                  <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={90} />
+                  <Tooltip formatter={(v) => fmtPct(v)} contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: 'var(--text)' }} />
+                  <Bar dataKey="valor" fill="var(--accent)" radius={[0, 4, 4, 0]} barSize={16} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -732,11 +2228,11 @@ function CartoesView({ data, onEdit, onNew, onDelete, onBack }) {
         </>
       )}
       <style jsx>{`
-        .expand-btn2 { margin-top:10px; display:inline-flex; align-items:center; gap:6px; background:none; border:1px solid #2A3140; border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; color:#8891A0; cursor:pointer; }
+        .expand-btn2 { margin-top:10px; display:inline-flex; align-items:center; gap:6px; background:none; border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; color:var(--text-muted); cursor:pointer; }
         .parcelas-taxa-grid { margin-top:10px; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
-        .pti { background:#12161D; border:1px solid #232A38; border-radius:9px; padding:8px; display:flex; flex-direction:column; gap:2px; }
+        .pti { background:var(--surface-alt); border:1px solid var(--border-strong); border-radius:9px; padding:8px; display:flex; flex-direction:column; gap:2px; }
         .pti .k { font-size:10px; } .pti .v { font-size:12.5px; }
-        .muted2 { color:#5A6272; font-size:14px; padding:0 20px 8px; }
+        .muted2 { color:var(--text-dim); font-size:14px; padding:0 20px 8px; }
       `}</style>
       <ViewStyle />
     </div>
@@ -752,10 +2248,10 @@ function BoletosView({ data, onEdit, onNew, onDelete, onBack }) {
 
   const doExport = () => exportToExcel(data.taxasBoleto, [
     { header: 'Administradora', get: (t) => t.administradora, width: 24 },
-    { header: 'Emissão (R$)', get: (t) => Number(t.taxa_emissao) || 0, width: 14 },
-    { header: 'Baixa (R$)', get: (t) => Number(t.taxa_baixa) || 0, width: 14 },
-    { header: 'Protesto (R$)', get: (t) => Number(t.taxa_protesto) || 0, width: 14 },
-    { header: 'Antecipação (% a.m.)', get: (t) => Number(t.taxa_antecipacao) || 0, width: 18 },
+    { header: 'Emissão (R$)', get: (t) => Number(t.taxa_emissao) || 0, width: 14, money: true },
+    { header: 'Baixa (R$)', get: (t) => Number(t.taxa_baixa) || 0, width: 14, money: true },
+    { header: 'Protesto (R$)', get: (t) => Number(t.taxa_protesto) || 0, width: 14, money: true },
+    { header: 'Antecipação (% a.m.)', get: (t) => fmtPct(t.taxa_antecipacao), width: 18 },
   ], 'Taxas de Boleto', 'taxas-boleto');
 
   return (
@@ -798,11 +2294,11 @@ function BoletosView({ data, onEdit, onNew, onDelete, onBack }) {
             <div className="chart-box" style={{ margin: '0 20px' }}>
               <ResponsiveContainer width="100%" height={Math.max(120, comparativo.length * 40)}>
                 <BarChart data={comparativo} layout="vertical" margin={{ top: 4, right: 30, bottom: 4, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1E2430" horizontal={false} />
-                  <XAxis type="number" tick={{ fill: '#5A6272', fontSize: 10 }} tickFormatter={(v) => isAntecipacao ? `${v}%` : `R$${v}`} axisLine={false} tickLine={false} />
-                  <YAxis type="category" dataKey="name" tick={{ fill: '#8891A0', fontSize: 11 }} axisLine={false} tickLine={false} width={90} />
-                  <Tooltip formatter={(v) => isAntecipacao ? fmtPct(v) : fmtBRL(v)} contentStyle={{ background: '#1C222C', border: '1px solid #2A3140', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: '#E8EAED' }} />
-                  <Bar dataKey="valor" fill="#4FD1AE" radius={[0, 4, 4, 0]} barSize={16} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: 'var(--text-dim)', fontSize: 10 }} tickFormatter={(v) => isAntecipacao ? `${v}%` : `R$${v}`} axisLine={false} tickLine={false} />
+                  <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={90} />
+                  <Tooltip formatter={(v) => isAntecipacao ? fmtPct(v) : fmtBRL(v)} contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} labelStyle={{ color: 'var(--text)' }} />
+                  <Bar dataKey="valor" fill="var(--accent)" radius={[0, 4, 4, 0]} barSize={16} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -810,7 +2306,7 @@ function BoletosView({ data, onEdit, onNew, onDelete, onBack }) {
           <div style={{ padding: '14px 20px 4px' }}><ExportButton onClick={doExport} disabled={data.taxasBoleto.length === 0} label="Exportar comparativo (Excel)" /></div>
         </>
       )}
-      <style jsx>{`.muted2 { color:#5A6272; font-size:14px; padding:0 20px 8px; }`}</style>
+      <style jsx>{`.muted2 { color:var(--text-dim); font-size:14px; padding:0 20px 8px; }`}</style>
       <ViewStyle />
     </div>
   );
@@ -823,11 +2319,19 @@ function ReportsHome({ view, setView, data }) {
   if (view === 'empresas') return <ReportSaldosEmpresas data={data} onBack={() => setView(null)} />;
   if (view === 'contas') return <ReportContasPagar data={data} onBack={() => setView(null)} />;
   if (view === 'pagamentos') return <ReportPagamentos data={data} onBack={() => setView(null)} />;
+  if (view === 'emprestimos-empresa') return <ReportEmprestimosPorEmpresa data={data} onBack={() => setView(null)} />;
+  if (view === 'parcelas-emprestimo') return <ReportParcelasEmprestimo data={data} onBack={() => setView(null)} />;
+  if (view === 'seguros') return <ReportSeguros data={data} onBack={() => setView(null)} />;
+  if (view === 'vendas') return <ReportVendas data={data} onBack={() => setView(null)} />;
   const options = [
     { key: 'bancos', label: 'Saldos por banco', desc: 'Total consolidado em cada conta bancária', icon: Landmark },
     { key: 'empresas', label: 'Saldos por empresa', desc: 'Total consolidado por empresa do grupo', icon: Building2 },
     { key: 'contas', label: 'Contas a pagar', desc: 'Pendentes e atrasadas, filtráveis por empresa', icon: CalendarClock },
-    { key: 'pagamentos', label: 'Pagamentos realizados', desc: 'Histórico de contas já pagas', icon: CheckCircle2 },
+    { key: 'pagamentos', label: 'Pagamentos realizados', desc: 'Histórico de contas já pagas (baixas)', icon: CheckCircle2 },
+    { key: 'emprestimos-empresa', label: 'Empréstimos por empresa', desc: 'Bancários e entre empresas, agrupados por devedora', icon: HandCoins },
+    { key: 'parcelas-emprestimo', label: 'Parcelas de empréstimos', desc: 'Pendentes e pagas, filtráveis por tipo e empresa', icon: CalendarClock },
+    { key: 'seguros', label: 'Seguros', desc: 'Vigências, vencimentos e valores por empresa', icon: Shield },
+    { key: 'vendas', label: 'Vendas por setor', desc: 'Totais mensais e anuais desde 2018, por setor e empresa', icon: ShoppingCart },
   ];
   return (
     <div className="reports-home">
@@ -835,17 +2339,29 @@ function ReportsHome({ view, setView, data }) {
         <button key={key} className="report-option" onClick={() => setView(key)}>
           <div className="report-icon"><Icon size={18} /></div>
           <div className="report-text"><div className="report-label">{label}</div><div className="report-desc">{desc}</div></div>
-          <ChevronRight size={18} color="#5A6272" />
+          <ChevronRight size={18} color="var(--text-dim)" />
         </button>
       ))}
       <style jsx>{`
         .reports-home { padding:16px 20px 24px; display:flex; flex-direction:column; gap:10px; }
-        .report-option { display:flex; align-items:center; gap:12px; background:#1C222C; border:1px solid #2A3140; border-radius:14px; padding:14px; cursor:pointer; text-align:left; }
-        .report-icon { width:38px; height:38px; border-radius:10px; background:rgba(79,209,174,0.12); color:#4FD1AE; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .report-option { display:flex; align-items:center; gap:12px; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; cursor:pointer; text-align:left; box-shadow:0 1px 2px rgba(27,39,51,0.04); }
+        .report-icon { width:38px; height:38px; border-radius:10px; background:var(--accent-soft-12); color:var(--accent); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
         .report-text { flex:1; }
-        .report-label { font-family:'Space Grotesk',sans-serif; font-size:14.5px; color:#E8EAED; font-weight:600; }
-        .report-desc { font-size:12px; color:#5A6272; margin-top:2px; }
+        .report-label { font-family:'Space Grotesk',sans-serif; font-size:14.5px; color:var(--text); font-weight:600; }
+        .report-desc { font-size:12px; color:var(--text-dim); margin-top:2px; }
       `}</style>
+    </div>
+  );
+}
+
+function ExportRow({ total, count, exportExcel, exportPdf }) {
+  return (
+    <div className="rtotal">
+      {count != null ? `Total (${count}): ` : 'Total: '}<span className="mono">{fmtBRL(total)}</span>
+      <div className="rbuttons">
+        <ExportButton disabled={!exportExcel} onClick={exportExcel} label="Excel" />
+        <ExportButton disabled={!exportPdf} onClick={exportPdf} label="PDF" />
+      </div>
     </div>
   );
 }
@@ -854,16 +2370,38 @@ function ReportSaldosBancos({ data, onBack }) {
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
   const total = data.bancos.reduce((s, b) => s + (Number(b.saldo) || 0), 0);
   const sorted = [...data.bancos].sort((a, b) => (Number(b.saldo) || 0) - (Number(a.saldo) || 0));
+  const columns = [
+    { header: 'Banco', get: (b) => b.nome_banco, width: 24 },
+    { header: 'Saldo', get: (b) => Number(b.saldo) || 0, width: 16, money: true },
+  ];
+  const groups = groupRows(sorted, (b) => b.empresa_id, (b) => empresaNome(b.empresa_id))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
   return (
     <div className="report-body">
       <ReportHeader title="Saldos por banco" onBack={onBack} />
-      <div className="rtotal">Total: <span className="mono">{fmtBRL(total)}</span> <ExportButton disabled={!sorted.length} onClick={() => exportToExcel(sorted, [
-        { header: 'Banco', get: (b) => b.nome_banco, width: 24 }, { header: 'Empresa', get: (b) => empresaNome(b.empresa_id), width: 24 }, { header: 'Saldo', get: (b) => Number(b.saldo) || 0, width: 16 },
-      ], 'Saldos por Banco', 'saldos-por-banco')} /></div>
+      <ExportRow
+        total={total}
+        exportExcel={sorted.length ? () => exportGroupedExcel({ groups: groups.map((g) => ({ ...g, label: `Empresa: ${g.label}` })), columns, valueColIndex: 1, sheetName: 'Saldos por Banco', fileName: 'saldos-por-banco', reportTitle: 'Saldos por Banco' }) : null}
+        exportPdf={sorted.length ? () => exportToPDF({ title: 'Saldos por Banco', groups: groups.map((g) => ({ ...g, label: `Empresa: ${g.label}` })), columns, valueColIndex: 1, fileName: 'saldos-por-banco' }) : null}
+      />
       {sorted.length === 0 ? <EmptyState icon={Landmark} text="Nenhum banco cadastrado." /> : (
-        <table className="rtable"><thead><tr><th>Banco</th><th>Empresa</th><th className="right">Saldo</th></tr></thead>
-          <tbody>{sorted.map((b) => <tr key={b.id}><td>{b.nome_banco}</td><td className="dim">{empresaNome(b.empresa_id)}</td><td className="right mono">{fmtBRL(b.saldo)}</td></tr>)}</tbody>
-        </table>
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, b) => s + (Number(b.saldo) || 0), 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Banco</th><th className="right">Saldo</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((b) => <tr key={b.id}><td>{b.nome_banco}</td><td className="right mono">{fmtBRL(b.saldo)}</td></tr>)}
+                    <tr className="subtotal-row"><td>Subtotal</td><td className="right mono">{fmtBRL(subtotal)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+        </div>
       )}
       <RptStyle /><ViewStyle />
     </div>
@@ -873,12 +2411,21 @@ function ReportSaldosBancos({ data, onBack }) {
 function ReportSaldosEmpresas({ data, onBack }) {
   const total = data.bancos.reduce((s, b) => s + (Number(b.saldo) || 0), 0);
   const rows = data.empresas.map((emp) => ({ nome: emp.nome, saldo: data.bancos.filter((b) => b.empresa_id === emp.id).reduce((s, b) => s + (Number(b.saldo) || 0), 0), numBancos: data.bancos.filter((b) => b.empresa_id === emp.id).length })).sort((a, b) => b.saldo - a.saldo);
+  const columns = [
+    { header: 'Empresa', get: (r) => r.nome, width: 24 },
+    { header: 'Bancos', get: (r) => r.numBancos, width: 12 },
+    { header: 'Saldo', get: (r) => r.saldo, width: 16, money: true },
+  ];
+  const groups = [{ label: 'Todas as empresas', rows }];
+
   return (
     <div className="report-body">
       <ReportHeader title="Saldos por empresa" onBack={onBack} />
-      <div className="rtotal">Total: <span className="mono">{fmtBRL(total)}</span> <ExportButton disabled={!rows.length} onClick={() => exportToExcel(rows, [
-        { header: 'Empresa', get: (r) => r.nome, width: 24 }, { header: 'Bancos', get: (r) => r.numBancos, width: 12 }, { header: 'Saldo', get: (r) => r.saldo, width: 16 },
-      ], 'Saldos por Empresa', 'saldos-por-empresa')} /></div>
+      <ExportRow
+        total={total}
+        exportExcel={rows.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Saldos por Empresa', fileName: 'saldos-por-empresa', reportTitle: 'Saldos por Empresa' }) : null}
+        exportPdf={rows.length ? () => exportToPDF({ title: 'Saldos por Empresa', groups, columns, valueColIndex: 2, fileName: 'saldos-por-empresa' }) : null}
+      />
       {rows.length === 0 ? <EmptyState icon={Building2} text="Nenhuma empresa cadastrada." /> : (
         <table className="rtable"><thead><tr><th>Empresa</th><th>Bancos</th><th className="right">Saldo</th></tr></thead>
           <tbody>{rows.map((r) => <tr key={r.nome}><td>{r.nome}</td><td className="dim">{r.numBancos}</td><td className="right mono">{fmtBRL(r.saldo)}</td></tr>)}</tbody>
@@ -889,12 +2436,41 @@ function ReportSaldosEmpresas({ data, onBack }) {
   );
 }
 
+function PeriodoFiltro({ de, ate, onDe, onAte }) {
+  return (
+    <div className="periodo-filtro">
+      <label><span>De</span><input className="input" type="date" value={de} onChange={(e) => onDe(e.target.value)} /></label>
+      <label><span>Até</span><input className="input" type="date" value={ate} onChange={(e) => onAte(e.target.value)} /></label>
+      <style jsx>{`
+        .periodo-filtro { display:flex; gap:8px; flex:1 1 100%; }
+        label { display:flex; flex-direction:column; gap:4px; flex:1; }
+        span { font-size:11px; color:var(--text-dim); }
+      `}</style>
+    </div>
+  );
+}
+
 function ReportContasPagar({ data, onBack }) {
   const [empresaFiltro, setEmpresaFiltro] = useState('todas');
   const [statusFiltro, setStatusFiltro] = useState('pendente');
+  const [periodoDe, setPeriodoDe] = useState('');
+  const [periodoAte, setPeriodoAte] = useState('');
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
-  const filtradas = useMemo(() => data.contas.filter((c) => empresaFiltro === 'todas' || c.empresa_id === empresaFiltro).filter((c) => statusFiltro === 'todas' || c.status === statusFiltro).sort((a, b) => a.data_vencimento.localeCompare(b.data_vencimento)), [data.contas, empresaFiltro, statusFiltro]);
+  const filtradas = useMemo(() => data.contas
+    .filter((c) => empresaFiltro === 'todas' || c.empresa_id === empresaFiltro)
+    .filter((c) => statusFiltro === 'todas' || c.status === statusFiltro)
+    .filter((c) => !periodoDe || c.data_vencimento >= periodoDe)
+    .filter((c) => !periodoAte || c.data_vencimento <= periodoAte)
+    .sort((a, b) => a.data_vencimento.localeCompare(b.data_vencimento)), [data.contas, empresaFiltro, statusFiltro, periodoDe, periodoAte]);
   const total = filtradas.reduce((s, c) => s + (Number(c.valor) || 0), 0);
+  const columns = [
+    { header: 'Descrição', get: (c) => c.descricao, width: 28 },
+    { header: 'Vencimento', get: (c) => fmtDate(c.data_vencimento), width: 14 },
+    { header: 'Status', get: (c) => c.status === 'pago' ? 'Pago' : (daysUntil(c.data_vencimento) < 0 ? 'Atrasada' : 'Pendente'), width: 12 },
+    { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16, money: true },
+  ];
+  const groups = groupRows(filtradas, (c) => c.empresa_id, (c) => `Empresa: ${empresaNome(c.empresa_id)}`);
+
   return (
     <div className="report-body">
       <ReportHeader title="Contas a pagar" onBack={onBack} />
@@ -906,17 +2482,17 @@ function ReportContasPagar({ data, onBack }) {
         <select className="select" value={statusFiltro} onChange={(e) => setStatusFiltro(e.target.value)}>
           <option value="pendente">Pendentes</option><option value="pago">Pagas</option><option value="todas">Todas</option>
         </select>
+        <PeriodoFiltro de={periodoDe} ate={periodoAte} onDe={setPeriodoDe} onAte={setPeriodoAte} />
       </div>
-      <div className="rtotal">Total ({filtradas.length}): <span className="mono">{fmtBRL(total)}</span> <ExportButton disabled={!filtradas.length} onClick={() => exportToExcel(filtradas, [
-        { header: 'Descrição', get: (c) => c.descricao, width: 28 }, { header: 'Empresa', get: (c) => empresaNome(c.empresa_id), width: 24 },
-        { header: 'Vencimento', get: (c) => fmtDate(c.data_vencimento), width: 14 },
-        { header: 'Status', get: (c) => c.status === 'pago' ? 'Pago' : (daysUntil(c.data_vencimento) < 0 ? 'Atrasada' : 'Pendente'), width: 12 },
-        { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16 },
-      ], 'Contas a Pagar', 'contas-a-pagar')} /></div>
+      <ExportRow
+        total={total} count={filtradas.length}
+        exportExcel={filtradas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 3, sheetName: 'Contas a Pagar', fileName: 'contas-a-pagar', reportTitle: 'Contas a Pagar' }) : null}
+        exportPdf={filtradas.length ? () => exportToPDF({ title: 'Contas a Pagar', groups, columns, valueColIndex: 3, fileName: 'contas-a-pagar' }) : null}
+      />
       {filtradas.length === 0 ? <EmptyState icon={CalendarClock} text="Nenhuma conta encontrada." /> : (
         <table className="rtable"><thead><tr><th>Descrição</th><th>Empresa</th><th>Vencimento</th><th className="right">Valor</th></tr></thead>
           <tbody>{filtradas.map((c) => { const atrasada = c.status === 'pendente' && daysUntil(c.data_vencimento) < 0; return (
-            <tr key={c.id}><td>{c.descricao}</td><td className="dim">{empresaNome(c.empresa_id)}</td><td style={{ color: atrasada ? '#E2596B' : undefined }}>{fmtDate(c.data_vencimento)}</td><td className="right mono">{fmtBRL(c.valor)}</td></tr>
+            <tr key={c.id}><td>{c.descricao}</td><td className="dim">{empresaNome(c.empresa_id)}</td><td style={{ color: atrasada ? 'var(--danger)' : undefined }}>{fmtDate(c.data_vencimento)}</td><td className="right mono">{fmtBRL(c.valor)}</td></tr>
           ); })}</tbody>
         </table>
       )}
@@ -927,24 +2503,40 @@ function ReportContasPagar({ data, onBack }) {
 
 function ReportPagamentos({ data, onBack }) {
   const [empresaFiltro, setEmpresaFiltro] = useState('todas');
+  const [periodoDe, setPeriodoDe] = useState('');
+  const [periodoAte, setPeriodoAte] = useState('');
   const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
-  const pagas = useMemo(() => data.contas.filter((c) => c.status === 'pago').filter((c) => empresaFiltro === 'todas' || c.empresa_id === empresaFiltro).sort((a, b) => (b.data_pagamento || '').localeCompare(a.data_pagamento || '')), [data.contas, empresaFiltro]);
+  const pagas = useMemo(() => data.contas
+    .filter((c) => c.status === 'pago')
+    .filter((c) => empresaFiltro === 'todas' || c.empresa_id === empresaFiltro)
+    .filter((c) => !periodoDe || (c.data_pagamento || '') >= periodoDe)
+    .filter((c) => !periodoAte || (c.data_pagamento || '') <= periodoAte)
+    .sort((a, b) => (b.data_pagamento || '').localeCompare(a.data_pagamento || '')), [data.contas, empresaFiltro, periodoDe, periodoAte]);
   const total = pagas.reduce((s, c) => s + (Number(c.valor) || 0), 0);
+  const columns = [
+    { header: 'Descrição', get: (c) => c.descricao, width: 28 },
+    { header: 'Baixa em', get: (c) => fmtDate(c.data_pagamento), width: 14 },
+    { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16, money: true },
+  ];
+  const groups = groupRows(pagas, (c) => c.empresa_id, (c) => `Empresa: ${empresaNome(c.empresa_id)}`);
+
   return (
     <div className="report-body">
-      <ReportHeader title="Pagamentos realizados" onBack={onBack} />
+      <ReportHeader title="Contas pagas (baixas)" onBack={onBack} />
       <div className="report-filters" style={{ marginBottom: 10 }}>
         <select className="select" value={empresaFiltro} onChange={(e) => setEmpresaFiltro(e.target.value)}>
           <option value="todas">Todas as empresas</option>
           {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
         </select>
+        <PeriodoFiltro de={periodoDe} ate={periodoAte} onDe={setPeriodoDe} onAte={setPeriodoAte} />
       </div>
-      <div className="rtotal">Total pago ({pagas.length}): <span className="mono">{fmtBRL(total)}</span> <ExportButton disabled={!pagas.length} onClick={() => exportToExcel(pagas, [
-        { header: 'Descrição', get: (c) => c.descricao, width: 28 }, { header: 'Empresa', get: (c) => empresaNome(c.empresa_id), width: 24 },
-        { header: 'Pago em', get: (c) => fmtDate(c.data_pagamento), width: 14 }, { header: 'Valor', get: (c) => Number(c.valor) || 0, width: 16 },
-      ], 'Pagamentos', 'pagamentos-realizados')} /></div>
-      {pagas.length === 0 ? <EmptyState icon={CheckCircle2} text="Nenhum pagamento registrado ainda." /> : (
-        <table className="rtable"><thead><tr><th>Descrição</th><th>Empresa</th><th>Pago em</th><th className="right">Valor</th></tr></thead>
+      <ExportRow
+        total={total} count={pagas.length}
+        exportExcel={pagas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Contas Pagas', fileName: 'contas-pagas', reportTitle: 'Contas Pagas (Baixas)' }) : null}
+        exportPdf={pagas.length ? () => exportToPDF({ title: 'Contas Pagas (Baixas)', groups, columns, valueColIndex: 2, fileName: 'contas-pagas' }) : null}
+      />
+      {pagas.length === 0 ? <EmptyState icon={CheckCircle2} text="Nenhuma baixa registrada ainda." /> : (
+        <table className="rtable"><thead><tr><th>Descrição</th><th>Empresa</th><th>Baixa em</th><th className="right">Valor</th></tr></thead>
           <tbody>{pagas.map((c) => <tr key={c.id}><td>{c.descricao}</td><td className="dim">{empresaNome(c.empresa_id)}</td><td>{fmtDate(c.data_pagamento)}</td><td className="right mono">{fmtBRL(c.valor)}</td></tr>)}</tbody>
         </table>
       )}
@@ -953,8 +2545,362 @@ function ReportPagamentos({ data, onBack }) {
   );
 }
 
+function dataFinalContrato(e) {
+  const parcelas = e.parcelas || [];
+  if (parcelas.length) return parcelas[parcelas.length - 1].data_vencimento;
+  // fallback caso as parcelas ainda não tenham sido carregadas
+  // "num_parcelas" já representa o prazo total do contrato em meses (inclui a carência)
+  return addMonthsLocal(e.data_inicio, (Number(e.num_parcelas) || 1) - 1);
+}
+
+function ReportEmprestimosPorEmpresa({ data, onBack }) {
+  const [tipoFiltro, setTipoFiltro] = useState('todos');
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const lista = data.emprestimos.filter((e) => tipoFiltro === 'todos' || e.tipo === tipoFiltro);
+  const total = lista.reduce((s, e) => s + (Number(e.valor_total) || 0), 0);
+  const columns = [
+    { header: 'Tipo', get: (e) => (e.tipo || 'banco') === 'banco' ? 'Bancário' : 'Intercompany', width: 14 },
+    { header: 'Credor / Empresa credora', get: (e) => (e.tipo || 'banco') === 'banco' ? e.credor : empresaNome(e.empresa_credora_id), width: 24 },
+    { header: 'Linha de crédito', get: (e) => e.linha_credito || '—', width: 20 },
+    { header: 'Valor da parcela', get: (e) => Number(e.valor_parcela) || 0, width: 16, money: true },
+    { header: 'Parcelas pagas', get: (e) => `${(e.parcelas || []).filter((p) => p.status === 'pago').length}/${(e.parcelas || []).length}`, width: 14 },
+    { header: 'Carência', get: (e) => e.tem_carencia ? `${e.prazo_carencia} ${e.prazo_carencia === 1 ? 'mês' : 'meses'}` : 'Sem carência', width: 16 },
+    { header: 'Data final do contrato', get: (e) => fmtDate(dataFinalContrato(e)), width: 18 },
+    { header: 'Valor total', get: (e) => Number(e.valor_total) || 0, width: 16, money: true },
+  ];
+  const groups = groupRows(lista, (e) => e.empresa_id, (e) => `Empresa devedora: ${empresaNome(e.empresa_id)}`);
+
+  return (
+    <div className="report-body">
+      <ReportHeader title="Empréstimos por empresa" onBack={onBack} />
+      <div className="report-filters" style={{ marginBottom: 10 }}>
+        <select className="select" value={tipoFiltro} onChange={(e) => setTipoFiltro(e.target.value)}>
+          <option value="todos">Todos os tipos</option>
+          <option value="banco">Somente bancários</option>
+          <option value="empresa">Somente entre empresas</option>
+        </select>
+      </div>
+      <ExportRow
+        total={total} count={lista.length}
+        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 7, sheetName: 'Empréstimos', fileName: 'emprestimos-por-empresa', reportTitle: 'Empréstimos por Empresa' }) : null}
+        exportPdf={lista.length ? () => exportToPDF({ title: 'Empréstimos por Empresa', groups, columns, valueColIndex: 7, fileName: 'emprestimos-por-empresa' }) : null}
+      />
+      {lista.length === 0 ? <EmptyState icon={HandCoins} text="Nenhum empréstimo encontrado." /> : (
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, e) => s + (Number(e.valor_total) || 0), 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Tipo</th><th>Credor/Credora</th><th className="right">Parcela</th><th>Parcelas</th><th>Carência</th><th>Final do contrato</th><th className="right">Valor total</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((e) => (
+                      <tr key={e.id}>
+                        <td>{(e.tipo || 'banco') === 'banco' ? 'Bancário' : 'Intercompany'}</td>
+                        <td className="dim">{(e.tipo || 'banco') === 'banco' ? e.credor : empresaNome(e.empresa_credora_id)}</td>
+                        <td className="right mono">{fmtBRL(e.valor_parcela)}</td>
+                        <td className="dim">{(e.parcelas || []).filter((p) => p.status === 'pago').length}/{(e.parcelas || []).length}</td>
+                        <td className="dim">{e.tem_carencia ? `${e.prazo_carencia} ${e.prazo_carencia === 1 ? 'mês' : 'meses'}` : '—'}</td>
+                        <td className="dim">{fmtDate(dataFinalContrato(e))}</td>
+                        <td className="right mono">{fmtBRL(e.valor_total)}</td>
+                      </tr>
+                    ))}
+                    <tr className="subtotal-row"><td colSpan={6}>Subtotal {g.label.replace('Empresa devedora: ', '')}</td><td className="right mono">{fmtBRL(subtotal)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          <div className="grand-total-row">
+            <span>Total geral</span>
+            <span className="mono">{fmtBRL(total)}</span>
+          </div>
+        </div>
+      )}
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
+function ReportParcelasEmprestimo({ data, onBack }) {
+  const [empresaFiltro, setEmpresaFiltro] = useState('todas');
+  const [tipoFiltro, setTipoFiltro] = useState('todos');
+  const [statusFiltro, setStatusFiltro] = useState('pendente');
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+
+  const linhas = useMemo(() => {
+    const out = [];
+    data.emprestimos
+      .filter((e) => empresaFiltro === 'todas' || e.empresa_id === empresaFiltro)
+      .filter((e) => tipoFiltro === 'todos' || e.tipo === tipoFiltro)
+      .forEach((e) => {
+        (e.parcelas || [])
+          .filter((p) => statusFiltro === 'todas' || p.status === statusFiltro)
+          .forEach((p) => out.push({ ...p, emprestimo: e }));
+      });
+    return out.sort((a, b) => a.data_vencimento.localeCompare(b.data_vencimento));
+  }, [data.emprestimos, empresaFiltro, tipoFiltro, statusFiltro]);
+
+  const total = linhas.reduce((s, p) => s + (Number(p.valor) || 0), 0);
+  const columns = [
+    { header: 'Credor/Credora', get: (p) => (p.emprestimo.tipo || 'banco') === 'banco' ? p.emprestimo.credor : empresaNome(p.emprestimo.empresa_credora_id), width: 24 },
+    { header: 'Parcela', get: (p) => `${p.numero}ª`, width: 10 },
+    { header: 'Vencimento', get: (p) => fmtDate(p.data_vencimento), width: 14 },
+    { header: 'Status', get: (p) => p.status === 'pago' ? 'Pago' : (daysUntil(p.data_vencimento) < 0 ? 'Atrasada' : 'Pendente'), width: 12 },
+    { header: 'Valor', get: (p) => Number(p.valor) || 0, width: 16, money: true },
+  ];
+  const groups = groupRows(linhas, (p) => p.emprestimo.empresa_id, (p) => `Empresa devedora: ${empresaNome(p.emprestimo.empresa_id)}`);
+
+  return (
+    <div className="report-body">
+      <ReportHeader title="Parcelas de empréstimos" onBack={onBack} />
+      <div className="report-filters" style={{ marginBottom: 10 }}>
+        <select className="select" value={empresaFiltro} onChange={(e) => setEmpresaFiltro(e.target.value)}>
+          <option value="todas">Todas as empresas</option>
+          {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+        <select className="select" value={tipoFiltro} onChange={(e) => setTipoFiltro(e.target.value)}>
+          <option value="todos">Todos os tipos</option>
+          <option value="banco">Bancários</option>
+          <option value="empresa">Entre empresas</option>
+        </select>
+        <select className="select" value={statusFiltro} onChange={(e) => setStatusFiltro(e.target.value)}>
+          <option value="pendente">Pendentes</option><option value="pago">Pagas</option><option value="todas">Todas</option>
+        </select>
+      </div>
+      <ExportRow
+        total={total} count={linhas.length}
+        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 4, sheetName: 'Parcelas', fileName: 'parcelas-emprestimos', reportTitle: 'Parcelas de Empréstimos' }) : null}
+        exportPdf={linhas.length ? () => exportToPDF({ title: 'Parcelas de Empréstimos', groups, columns, valueColIndex: 4, fileName: 'parcelas-emprestimos' }) : null}
+      />
+      {linhas.length === 0 ? <EmptyState icon={CalendarClock} text="Nenhuma parcela encontrada." /> : (
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, p) => s + (Number(p.valor) || 0), 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Credor/Credora</th><th>Parcela</th><th>Vencimento</th><th className="right">Valor</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((p) => {
+                      const atrasada = p.status === 'pendente' && daysUntil(p.data_vencimento) < 0;
+                      return (
+                        <tr key={p.id}>
+                          <td className="dim">{(p.emprestimo.tipo || 'banco') === 'banco' ? p.emprestimo.credor : empresaNome(p.emprestimo.empresa_credora_id)}</td>
+                          <td>{p.numero}ª</td>
+                          <td style={{ color: atrasada ? 'var(--danger)' : undefined }}>{fmtDate(p.data_vencimento)}</td>
+                          <td className="right mono">{fmtBRL(p.valor)}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="subtotal-row"><td colSpan={3}>Subtotal {g.label.replace('Empresa devedora: ', '')}</td><td className="right mono">{fmtBRL(subtotal)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          <div className="grand-total-row">
+            <span>Total geral</span>
+            <span className="mono">{fmtBRL(total)}</span>
+          </div>
+        </div>
+      )}
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
+function ReportSeguros({ data, onBack }) {
+  const [empresaFiltro, setEmpresaFiltro] = useState('todas');
+  const [statusFiltro, setStatusFiltro] = useState('todos');
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+  const formaLabel = (v) => FORMAS_PAGAMENTO_SEGURO.find((f) => f.value === v)?.label || v;
+
+  const lista = useMemo(() => (data.seguros || [])
+    .filter((s) => empresaFiltro === 'todas' || s.empresa_id === empresaFiltro)
+    .filter((s) => statusFiltro === 'todos' || statusSeguro(s.vigencia_fim) === statusFiltro)
+    .sort((a, b) => a.vigencia_fim.localeCompare(b.vigencia_fim)), [data.seguros, empresaFiltro, statusFiltro]);
+
+  const total = lista.reduce((s, x) => s + (Number(x.valor_total) || 0), 0);
+  const columns = [
+    { header: 'Objeto', get: (s) => s.objeto, width: 24 },
+    { header: 'Seguradora', get: (s) => s.seguradora, width: 20 },
+    { header: 'Vigência início', get: (s) => fmtDate(s.vigencia_inicio), width: 14 },
+    { header: 'Vigência fim', get: (s) => fmtDate(s.vigencia_fim), width: 14 },
+    { header: 'Condutor', get: (s) => s.principal_condutor || '—', width: 18 },
+    { header: 'Pagamento', get: (s) => formaLabel(s.forma_pagamento), width: 14 },
+    { header: 'Valor total', get: (s) => Number(s.valor_total) || 0, width: 16, money: true },
+  ];
+  const groups = groupRows(lista, (s) => s.empresa_id, (s) => `Empresa: ${empresaNome(s.empresa_id)}`);
+
+  return (
+    <div className="report-body">
+      <ReportHeader title="Seguros" onBack={onBack} />
+      <div className="report-filters" style={{ marginBottom: 10 }}>
+        <select className="select" value={empresaFiltro} onChange={(e) => setEmpresaFiltro(e.target.value)}>
+          <option value="todas">Todas as empresas</option>
+          {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+        <select className="select" value={statusFiltro} onChange={(e) => setStatusFiltro(e.target.value)}>
+          <option value="todos">Todos os status</option>
+          <option value="vigente">Vigentes</option>
+          <option value="vencendo">Vencendo em 30 dias</option>
+          <option value="vencido">Vencidos</option>
+        </select>
+      </div>
+      <ExportRow
+        total={total} count={lista.length}
+        exportExcel={lista.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 6, sheetName: 'Seguros', fileName: 'seguros', reportTitle: 'Seguros' }) : null}
+        exportPdf={lista.length ? () => exportToPDF({ title: 'Seguros', groups, columns, valueColIndex: 6, fileName: 'seguros' }) : null}
+      />
+      {lista.length === 0 ? <EmptyState icon={Shield} text="Nenhum seguro encontrado." /> : (
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, x) => s + (Number(x.valor_total) || 0), 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Objeto</th><th>Seguradora</th><th>Vigência</th><th>Status</th><th className="right">Valor total</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((s) => (
+                      <tr key={s.id}>
+                        <td>{s.objeto}</td>
+                        <td className="dim">{s.seguradora}</td>
+                        <td className="dim">{fmtDate(s.vigencia_inicio)} – {fmtDate(s.vigencia_fim)}</td>
+                        <td><SeguroStatusBadge vigenciaFim={s.vigencia_fim} /></td>
+                        <td className="right mono">{fmtBRL(s.valor_total)}</td>
+                      </tr>
+                    ))}
+                    <tr className="subtotal-row"><td colSpan={4}>Subtotal {g.label.replace('Empresa: ', '')}</td><td className="right mono">{fmtBRL(subtotal)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          <div className="grand-total-row">
+            <span>Total geral</span>
+            <span className="mono">{fmtBRL(total)}</span>
+          </div>
+        </div>
+      )}
+      <style jsx>{inputCss}</style>
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
+function ReportVendas({ data, onBack }) {
+  const [empresaFiltro, setEmpresaFiltro] = useState('todas');
+  const [setorFiltro, setSetorFiltro] = useState('todos');
+  const [anoDe, setAnoDe] = useState(ANO_INICIAL_VENDAS);
+  const [anoAte, setAnoAte] = useState(new Date().getFullYear());
+  const empresaNome = (id) => data.empresas.find((e) => e.id === id)?.nome || '—';
+
+  // Agrega os lançamentos mensais em totais por empresa + setor + ano
+  const linhas = useMemo(() => {
+    const map = new Map();
+    (data.vendas || [])
+      .filter((v) => empresaFiltro === 'todas' || v.empresa_id === empresaFiltro)
+      .filter((v) => setorFiltro === 'todos' || v.setor === setorFiltro)
+      .filter((v) => v.ano >= anoDe && v.ano <= anoAte)
+      .forEach((v) => {
+        const key = `${v.empresa_id}|${v.setor}|${v.ano}`;
+        if (!map.has(key)) map.set(key, { empresa_id: v.empresa_id, setor: v.setor, ano: v.ano, total: 0 });
+        map.get(key).total += Number(v.valor) || 0;
+      });
+    return Array.from(map.values()).sort((a, b) => b.ano - a.ano || a.setor.localeCompare(b.setor));
+  }, [data.vendas, empresaFiltro, setorFiltro, anoDe, anoAte]);
+
+  const total = linhas.reduce((s, l) => s + l.total, 0);
+  const columns = [
+    { header: 'Setor', get: (l) => setorLabel(l.setor), width: 22 },
+    { header: 'Ano', get: (l) => l.ano, width: 10 },
+    { header: 'Total do ano', get: (l) => l.total, width: 16, money: true },
+  ];
+  const groups = groupRows(linhas, (l) => l.empresa_id, (l) => `Empresa: ${empresaNome(l.empresa_id)}`);
+
+  return (
+    <div className="report-body">
+      <ReportHeader title="Vendas por setor" onBack={onBack} />
+      <div className="report-filters" style={{ marginBottom: 10 }}>
+        <select className="select" value={empresaFiltro} onChange={(e) => setEmpresaFiltro(e.target.value)}>
+          <option value="todas">Todas as empresas</option>
+          {data.empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+        </select>
+        <select className="select" value={setorFiltro} onChange={(e) => setSetorFiltro(e.target.value)}>
+          <option value="todos">Todos os setores</option>
+          {SETORES_VENDA.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+        <div className="periodo-anos">
+          <label><span>De</span>
+            <select className="select" value={anoDe} onChange={(e) => setAnoDe(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().slice().reverse().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </label>
+          <label><span>Até</span>
+            <select className="select" value={anoAte} onChange={(e) => setAnoAte(parseInt(e.target.value, 10))}>
+              {anosDisponiveis().map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
+      <ExportRow
+        total={total} count={linhas.length}
+        exportExcel={linhas.length ? () => exportGroupedExcel({ groups, columns, valueColIndex: 2, sheetName: 'Vendas', fileName: 'vendas-por-setor', reportTitle: `Vendas por Setor (${anoDe}–${anoAte})` }) : null}
+        exportPdf={linhas.length ? () => exportToPDF({ title: `Vendas por Setor (${anoDe}–${anoAte})`, groups, columns, valueColIndex: 2, fileName: 'vendas-por-setor' }) : null}
+      />
+      {linhas.length === 0 ? <EmptyState icon={ShoppingCart} text="Nenhum lançamento de venda encontrado nesse período." /> : (
+        <div className="grouped-report">
+          {groups.map((g) => {
+            const subtotal = g.rows.reduce((s, l) => s + l.total, 0);
+            return (
+              <div key={g.label} className="group-block">
+                <div className="group-head"><Building2 size={14} /> {g.label}</div>
+                <table className="rtable"><thead><tr><th>Setor</th><th>Ano</th><th className="right">Total</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((l) => (
+                      <tr key={`${l.setor}-${l.ano}`}>
+                        <td>{setorLabel(l.setor)}</td>
+                        <td className="dim">{l.ano}</td>
+                        <td className="right mono">{fmtBRL(l.total)}</td>
+                      </tr>
+                    ))}
+                    <tr className="subtotal-row"><td colSpan={2}>Subtotal {g.label.replace('Empresa: ', '')}</td><td className="right mono">{fmtBRL(subtotal)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+          <div className="grand-total-row">
+            <span>Total geral</span>
+            <span className="mono">{fmtBRL(total)}</span>
+          </div>
+        </div>
+      )}
+      <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .periodo-anos { display:flex; gap:8px; flex:1 1 100%; }
+        .periodo-anos label { display:flex; flex-direction:column; gap:4px; flex:1; }
+        .periodo-anos span { font-size:11px; color:var(--text-dim); }
+      `}</style>
+      <RptStyle /><ViewStyle />
+    </div>
+  );
+}
+
 function RptStyle() {
-  return <style jsx global>{`.rtotal { display:flex; align-items:center; gap:10px; margin:12px 20px 14px; font-size:13px; color:#8891A0; } .rtotal .mono { color:#E8EAED; font-size:15px; font-weight:600; }`}</style>;
+  return <style jsx global>{`
+    .rtotal { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:12px 20px 14px; font-size:13px; color:var(--text-muted); }
+    .rtotal .mono { color:var(--text); font-size:15px; font-weight:600; }
+    .rbuttons { display:flex; gap:8px; margin-left:auto; }
+    .grouped-report { padding:0 20px 8px; display:flex; flex-direction:column; gap:18px; }
+    .group-block { display:flex; flex-direction:column; gap:6px; }
+    .group-head { display:flex; align-items:center; gap:6px; font-family:'Space Grotesk',sans-serif; font-size:13.5px; color:var(--accent); font-weight:600; }
+    .group-block .rtable { width:100%; margin:0; }
+    .subtotal-row td { font-weight:600; color:var(--text); border-top:1px solid var(--border-strong); border-bottom:none; }
+    .grand-total-row { display:flex; justify-content:space-between; align-items:center; margin-top:4px; padding:12px 16px; background:var(--accent); border-radius:10px; font-size:14px; font-weight:700; color:var(--accent-contrast); }
+    .grand-total-row .mono { font-size:16px; }
+  `}</style>;
 }
 
 // ---------- Forms ----------
@@ -981,7 +2927,7 @@ function BancoForm({ item, empresas, onClose, onSave }) {
         <>
           <Field label="Empresa"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
           <Field label="Banco"><input className="input" value={nomeBanco} onChange={(e) => setNomeBanco(e.target.value)} placeholder="Ex: Itaú, Bradesco, Nubank..." /></Field>
-          <Field label="Saldo atual (R$)"><input className="input" type="number" step="0.01" value={saldo} onChange={(e) => setSaldo(e.target.value)} placeholder="0,00" /></Field>
+          <Field label="Saldo atual (R$)"><DecimalMaskInput value={saldo} onChange={setSaldo} /></Field>
           <PrimaryButton full onClick={() => canSave && onSave({ id: item?.id, empresaId, nomeBanco: nomeBanco.trim(), saldo: parseFloat(saldo) || 0 })}>{item ? 'Salvar alterações' : 'Salvar banco'}</PrimaryButton>
         </>
       )}
@@ -1002,7 +2948,7 @@ function ContaForm({ item, empresas, onClose, onSave }) {
         <>
           <Field label="Empresa"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
           <Field label="Descrição"><input className="input" value={descricao} onChange={(e) => setDescricao(e.target.value)} placeholder="Ex: Aluguel, fornecedor X..." /></Field>
-          <Field label="Valor (R$)"><input className="input" type="number" step="0.01" value={valor} onChange={(e) => setValor(e.target.value)} placeholder="0,00" /></Field>
+          <Field label="Valor (R$)"><DecimalMaskInput value={valor} onChange={setValor} /></Field>
           <Field label="Data de vencimento"><input className="input" type="date" value={dataVencimento} onChange={(e) => setDataVencimento(e.target.value)} /></Field>
           <PrimaryButton full onClick={() => canSave && onSave({ id: item?.id, empresaId, descricao: descricao.trim(), valor: parseFloat(valor) || 0, dataVencimento, status: item?.status || 'pendente', dataPagamento: item?.dataPagamento || null })}>{item ? 'Salvar alterações' : 'Salvar conta'}</PrimaryButton>
         </>
@@ -1013,27 +2959,109 @@ function ContaForm({ item, empresas, onClose, onSave }) {
 }
 
 function EmprestimoForm({ item, empresas, onClose, onSave }) {
+  const [tipo, setTipo] = useState(item?.tipo || 'banco');
   const [empresaId, setEmpresaId] = useState(item?.empresaId || empresas[0]?.id || '');
   const [credor, setCredor] = useState(item?.credor || '');
+  const [linhaCredito, setLinhaCredito] = useState(item?.linhaCredito || LINHAS_CREDITO[0]);
+  const [empresaCredoraId, setEmpresaCredoraId] = useState(item?.empresaCredoraId || '');
   const [valorTotal, setValorTotal] = useState(item?.valorTotal ?? '');
   const [valorParcela, setValorParcela] = useState(item?.valorParcela ?? '');
   const [numParcelas, setNumParcelas] = useState(item?.numParcelas ?? '');
   const [dataInicio, setDataInicio] = useState(item?.dataInicio || todayISO());
-  const canSave = empresaId && credor.trim() && valorTotal;
+  const [temCarencia, setTemCarencia] = useState(item?.temCarencia || false);
+  const [prazoCarencia, setPrazoCarencia] = useState(item?.prazoCarencia ?? '');
+
+  const empresasCredoras = empresas.filter((emp) => emp.id !== empresaId);
+  const canSave = empresaId && valorTotal && (tipo === 'banco' ? credor.trim() : empresaCredoraId);
+
+  const handleSave = () => onSave({
+    id: item?.id, empresaId, tipo,
+    credor: tipo === 'banco' ? credor.trim() : '',
+    linhaCredito: tipo === 'banco' ? linhaCredito : null,
+    empresaCredoraId: tipo === 'empresa' ? empresaCredoraId : null,
+    valorTotal: parseFloat(valorTotal) || 0,
+    valorParcela: parseFloat(valorParcela) || 0,
+    numParcelas: parseInt(numParcelas) || 0,
+    dataInicio,
+    temCarencia,
+    prazoCarencia: temCarencia ? (parseInt(prazoCarencia, 10) || 0) : 0,
+  });
+
   return (
     <Modal title={item ? 'Editar empréstimo' : 'Novo empréstimo'} onClose={onClose}>
       {empresas.length === 0 ? <p className="muted2">Cadastre uma empresa antes.</p> : (
         <>
-          <Field label="Empresa"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
-          <Field label="Credor / instituição"><input className="input" value={credor} onChange={(e) => setCredor(e.target.value)} placeholder="Ex: Banco do Brasil" /></Field>
-          <Field label="Valor total (R$)"><input className="input" type="number" step="0.01" value={valorTotal} onChange={(e) => setValorTotal(e.target.value)} placeholder="0,00" /></Field>
-          <Field label="Valor da parcela (R$)"><input className="input" type="number" step="0.01" value={valorParcela} onChange={(e) => setValorParcela(e.target.value)} placeholder="0,00" /></Field>
-          <Field label="Número de parcelas"><input className="input" type="number" value={numParcelas} onChange={(e) => setNumParcelas(e.target.value)} placeholder="Ex: 12" /></Field>
-          <Field label="Data de início"><input className="input" type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} /></Field>
-          <PrimaryButton full onClick={() => canSave && onSave({ id: item?.id, empresaId, credor: credor.trim(), valorTotal: parseFloat(valorTotal) || 0, valorParcela: parseFloat(valorParcela) || 0, numParcelas: parseInt(numParcelas) || 0, dataInicio })}>{item ? 'Salvar alterações' : 'Salvar empréstimo'}</PrimaryButton>
+          <Field label="Tipo de empréstimo">
+            <div className="tipo-toggle">
+              <button type="button" className={tipo === 'banco' ? 'active' : ''} onClick={() => setTipo('banco')}>Bancário</button>
+              <button type="button" className={tipo === 'empresa' ? 'active' : ''} onClick={() => setTipo('empresa')}>Entre empresas do grupo</button>
+            </div>
+          </Field>
+          <Field label="Empresa devedora"><select className="select" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>{empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}</select></Field>
+
+          {tipo === 'banco' ? (
+            <>
+              <Field label="Credor / instituição"><input className="input" value={credor} onChange={(e) => setCredor(e.target.value)} placeholder="Ex: Banco do Brasil" /></Field>
+              <Field label="Linha de crédito"><select className="select" value={linhaCredito} onChange={(e) => setLinhaCredito(e.target.value)}>{LINHAS_CREDITO.map((l) => <option key={l} value={l}>{l}</option>)}</select></Field>
+            </>
+          ) : (
+            <Field label="Empresa credora">
+              {empresasCredoras.length === 0 ? <p className="muted2">Cadastre outra empresa para poder registrar um empréstimo entre empresas do grupo.</p> : (
+                <select className="select" value={empresaCredoraId} onChange={(e) => setEmpresaCredoraId(e.target.value)}>
+                  <option value="">Selecione...</option>
+                  {empresasCredoras.map((emp) => <option key={emp.id} value={emp.id}>{emp.nome}</option>)}
+                </select>
+              )}
+            </Field>
+          )}
+
+          <Field label="Valor total (R$)"><DecimalMaskInput value={valorTotal} onChange={setValorTotal} /></Field>
+          <Field label="Valor da parcela (R$)"><DecimalMaskInput value={valorParcela} onChange={setValorParcela} /></Field>
+          <Field label="Prazo total do contrato (meses)"><input className="input" type="number" value={numParcelas} onChange={(e) => setNumParcelas(e.target.value)} placeholder="Ex: 36" /></Field>
+          <Field label="Data de início">
+            <input className="input" type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} />
+          </Field>
+
+          <Field label="Carência">
+            <label className="carencia-check">
+              <input type="checkbox" checked={temCarencia} onChange={(e) => setTemCarencia(e.target.checked)} />
+              <span>Este empréstimo tem período de carência</span>
+            </label>
+          </Field>
+          {temCarencia && (
+            <Field label="Prazo de carência (meses)">
+              <input className="input" type="number" min="1" value={prazoCarencia} onChange={(e) => setPrazoCarencia(e.target.value)} placeholder="Ex: 6" />
+            </Field>
+          )}
+          {numParcelas && dataInicio && (() => {
+            const totalMeses = parseInt(numParcelas, 10) || 0;
+            const carenciaMeses = temCarencia ? (parseInt(prazoCarencia, 10) || 0) : 0;
+            const qtdAmortizacao = Math.max(totalMeses - carenciaMeses, 0);
+            if (!qtdAmortizacao) return carenciaMeses >= totalMeses && totalMeses > 0 ? (
+              <p className="carencia-hint" style={{ color: 'var(--danger)' }}>A carência não pode ser igual ou maior que o prazo total do contrato.</p>
+            ) : null;
+            const primeiraParcela = addMonthsLocal(dataInicio, carenciaMeses);
+            const ultimaParcela = addMonthsLocal(dataInicio, totalMeses - 1);
+            return (
+              <p className="carencia-hint">
+                {carenciaMeses > 0 ? `Carência de ${carenciaMeses} ${carenciaMeses === 1 ? 'mês' : 'meses'}, depois ` : ''}
+                {qtdAmortizacao} {qtdAmortizacao === 1 ? 'parcela' : 'parcelas'} de amortização: 1ª em {fmtDate(primeiraParcela)}, última em {fmtDate(ultimaParcela)}.
+              </p>
+            );
+          })()}
+
+          <PrimaryButton full onClick={() => canSave && handleSave()}>{item ? 'Salvar alterações' : 'Salvar empréstimo'}</PrimaryButton>
         </>
       )}
       <style jsx>{inputCss}</style>
+      <style jsx>{`
+        .tipo-toggle { display:flex; gap:6px; }
+        .tipo-toggle button { flex:1; background:var(--surface); border:1px solid var(--border); color:var(--text-muted); font-size:12.5px; font-weight:600; padding:9px 8px; border-radius:8px; cursor:pointer; }
+        .tipo-toggle button.active { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+        .carencia-check { display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--text); cursor:pointer; }
+        .carencia-check input { width:16px; height:16px; accent-color:var(--accent); }
+        .carencia-hint { font-size:12.5px; color:var(--text-muted); margin:-6px 0 0; }
+      `}</style>
     </Modal>
   );
 }
@@ -1056,10 +3084,10 @@ function TransferForm({ bancos, onClose, onSave }) {
     <Modal title="Nova transferência" onClose={onClose}>
       <Field label="Banco de origem"><select className="select" value={bancoOrigemId} onChange={(e) => setBancoOrigemId(e.target.value)}>{bancos.map((b) => <option key={b.id} value={b.id}>{b.nome_banco} · {fmtBRL(b.saldo)}</option>)}</select></Field>
       <Field label="Banco de destino"><select className="select" value={bancoDestinoId} onChange={(e) => setBancoDestinoId(e.target.value)}>{bancos.map((b) => <option key={b.id} value={b.id}>{b.nome_banco} · {fmtBRL(b.saldo)}</option>)}</select></Field>
-      <Field label="Valor (R$)"><input className="input" type="number" step="0.01" value={valor} onChange={(e) => setValor(e.target.value)} placeholder="0,00" /></Field>
+      <Field label="Valor (R$)"><DecimalMaskInput value={valor} onChange={setValor} /></Field>
       <Field label="Data"><input className="input" type="date" value={data} onChange={(e) => setDataCampo(e.target.value)} /></Field>
       <Field label="Descrição (opcional)"><input className="input" value={descricao} onChange={(e) => setDescricao(e.target.value)} placeholder="Ex: Reforço de caixa" /></Field>
-      {erro && <p style={{ color: '#E2596B', fontSize: 13, margin: 0 }}>{erro}</p>}
+      {erro && <p style={{ color: 'var(--danger)', fontSize: 13, margin: 0 }}>{erro}</p>}
       <PrimaryButton full onClick={handleSave}>Transferir</PrimaryButton>
       <style jsx>{inputCss}</style>
     </Modal>
@@ -1083,15 +3111,15 @@ function CartaoTaxaForm({ item, onClose, onSave }) {
     <Modal title={item ? 'Editar taxa de cartão' : 'Nova taxa de cartão'} onClose={onClose}>
       <Field label="Administradora / operadora"><input className="input" value={administradora} onChange={(e) => setAdministradora(e.target.value)} placeholder="Ex: Stone, Cielo, Rede..." autoFocus /></Field>
       <Field label="Bandeira"><select className="select" value={bandeira} onChange={(e) => setBandeira(e.target.value)}>{BANDEIRAS.map((b) => <option key={b} value={b}>{b}</option>)}</select></Field>
-      <Field label="Taxa Pix (%)"><input className="input" type="number" step="0.01" value={taxaPix} onChange={(e) => setTaxaPix(e.target.value)} placeholder="0,00" /></Field>
-      <Field label="Taxa Débito (%)"><input className="input" type="number" step="0.01" value={taxaDebito} onChange={(e) => setTaxaDebito(e.target.value)} placeholder="0,00" /></Field>
-      <Field label="Taxa Crédito à vista (%)"><input className="input" type="number" step="0.01" value={taxaCreditoAvista} onChange={(e) => setTaxaCreditoAvista(e.target.value)} placeholder="0,00" /></Field>
+      <Field label="Taxa Pix (%)"><DecimalMaskInput value={taxaPix} onChange={setTaxaPix} /></Field>
+      <Field label="Taxa Débito (%)"><DecimalMaskInput value={taxaDebito} onChange={setTaxaDebito} /></Field>
+      <Field label="Taxa Crédito à vista (%)"><DecimalMaskInput value={taxaCreditoAvista} onChange={setTaxaCreditoAvista} /></Field>
       <Field label="Taxas de crédito parcelado (%)">
         <div className="pgrid">
           {PARCELAS_RANGE.map((n) => (
             <div key={n} className="pitem">
               <span>{n}x</span>
-              <input className="input" type="number" step="0.01" value={parcelas[n]} onChange={(e) => setParcelas((p) => ({ ...p, [n]: e.target.value }))} placeholder="0,00" />
+              <DecimalMaskInput value={parcelas[n]} onChange={(v) => setParcelas((p) => ({ ...p, [n]: v }))} />
             </div>
           ))}
         </div>
@@ -1101,7 +3129,7 @@ function CartaoTaxaForm({ item, onClose, onSave }) {
       <style jsx>{`
         .pgrid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
         .pitem { display:flex; flex-direction:column; gap:4px; }
-        .pitem span { font-size:11px; color:#5A6272; }
+        .pitem span { font-size:11px; color:var(--text-dim); }
         .pitem :global(.input) { padding:8px 9px; font-size:13px; }
       `}</style>
     </Modal>
@@ -1118,10 +3146,10 @@ function BoletoTaxaForm({ item, onClose, onSave }) {
   return (
     <Modal title={item ? 'Editar taxa de boleto' : 'Nova taxa de boleto'} onClose={onClose}>
       <Field label="Administradora / banco"><input className="input" value={administradora} onChange={(e) => setAdministradora(e.target.value)} placeholder="Ex: Itaú, Bradesco, Asaas..." autoFocus /></Field>
-      <Field label="Taxa de emissão (R$)"><input className="input" type="number" step="0.01" value={taxaEmissao} onChange={(e) => setTaxaEmissao(e.target.value)} placeholder="0,00" /></Field>
-      <Field label="Taxa de baixa (R$)"><input className="input" type="number" step="0.01" value={taxaBaixa} onChange={(e) => setTaxaBaixa(e.target.value)} placeholder="0,00" /></Field>
-      <Field label="Taxa de protesto (R$)"><input className="input" type="number" step="0.01" value={taxaProtesto} onChange={(e) => setTaxaProtesto(e.target.value)} placeholder="0,00" /></Field>
-      <Field label="Taxa de antecipação (% ao mês)"><input className="input" type="number" step="0.01" value={taxaAntecipacao} onChange={(e) => setTaxaAntecipacao(e.target.value)} placeholder="0,00" /></Field>
+      <Field label="Taxa de emissão (R$)"><DecimalMaskInput value={taxaEmissao} onChange={setTaxaEmissao} /></Field>
+      <Field label="Taxa de baixa (R$)"><DecimalMaskInput value={taxaBaixa} onChange={setTaxaBaixa} /></Field>
+      <Field label="Taxa de protesto (R$)"><DecimalMaskInput value={taxaProtesto} onChange={setTaxaProtesto} /></Field>
+      <Field label="Taxa de antecipação (% ao mês)"><DecimalMaskInput value={taxaAntecipacao} onChange={setTaxaAntecipacao} /></Field>
       <PrimaryButton full onClick={() => canSave && onSave({ id: item?.id, administradora: administradora.trim(), taxaEmissao: taxaEmissao === '' ? null : parseFloat(taxaEmissao), taxaBaixa: taxaBaixa === '' ? null : parseFloat(taxaBaixa), taxaProtesto: taxaProtesto === '' ? null : parseFloat(taxaProtesto), taxaAntecipacao: taxaAntecipacao === '' ? null : parseFloat(taxaAntecipacao) })}>{item ? 'Salvar alterações' : 'Salvar taxa'}</PrimaryButton>
       <style jsx>{inputCss}</style>
     </Modal>
